@@ -1,6 +1,6 @@
 [package]
 name = "ramparts"
-version = "0.6.8"
+version = "0.6.9"
 edition = "2021"
 authors = ["Sharath Rajasekar <sharath@getjavelin.com>"]
 description = "A CLI tool for scanning Model Context Protocol (MCP) servers"
@@ -86,6 +86,9 @@ yara-x = { version = "1.4", optional = true }
 
 # Official Rust MCP SDK
 rmcp = { version = "0.3.2", features = ["client", "reqwest", "transport-child-process", "transport-streamable-http-client", "transport-sse-client", "transport-worker"] }
+
+# Random number generation for request IDs
+rand = "0.8"
 
 [build-dependencies]
 chrono = "0.4"
