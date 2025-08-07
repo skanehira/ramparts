@@ -5,10 +5,10 @@ pub mod cross_origin_scanner;
 use crate::constants::{messages, DEFAULT_LLM_BATCH_SIZE};
 use crate::types::{MCPPrompt, MCPResource, MCPTool};
 use anyhow::{anyhow, Result};
-use tracing::{debug, error};
 use reqwest::Client;
 use serde_json::{json, Value};
 use spinners::{Spinner, Spinners};
+use tracing::{debug, error};
 
 /// Trait for items that can be batch scanned for security issues
 pub trait BatchScannableItem {
@@ -661,18 +661,37 @@ If no genuine security issues found, return empty array []."
     async fn query_llm(&self, prompt: &str, show_details: bool) -> Result<String> {
         // Enhanced validation with detailed error messages
         if !self.is_llm_configured() {
-            let endpoint_status = if self.model_endpoint.is_some() { "✅" } else { "❌" };
+            let endpoint_status = if self.model_endpoint.is_some() {
+                "✅"
+            } else {
+                "❌"
+            };
             let api_key_status = if self.api_key.is_some() { "✅" } else { "❌" };
-            
+
             error!("🚨 LLM Configuration Check Failed:");
-            error!("   Endpoint configured: {} {}", endpoint_status, 
-                   self.model_endpoint.as_deref().unwrap_or("NOT SET"));
-            error!("   API key configured: {} {}", api_key_status,
-                   if self.api_key.is_some() { "SET (hidden)" } else { "NOT SET" });
-            error!("   💡 Hint: Set OPENAI_API_KEY environment variable or configure in ramparts.yaml");
-            
-            return Err(anyhow!("LLM not configured: missing endpoint ({}) or API key ({})", 
-                              endpoint_status, api_key_status));
+            error!(
+                "   Endpoint configured: {} {}",
+                endpoint_status,
+                self.model_endpoint.as_deref().unwrap_or("NOT SET")
+            );
+            error!(
+                "   API key configured: {} {}",
+                api_key_status,
+                if self.api_key.is_some() {
+                    "SET (hidden)"
+                } else {
+                    "NOT SET"
+                }
+            );
+            error!(
+                "   💡 Hint: Set OPENAI_API_KEY environment variable or configure in ramparts.yaml"
+            );
+
+            return Err(anyhow!(
+                "LLM not configured: missing endpoint ({}) or API key ({})",
+                endpoint_status,
+                api_key_status
+            ));
         }
 
         let client = Client::new();
@@ -684,16 +703,22 @@ If no genuine security issues found, return empty array []."
 
         // Get validated LLM configuration
         let (endpoint, api_key) = self.get_llm_config()?;
-        
+
         debug!("🔧 LLM Configuration:");
         debug!("   Endpoint: {}", endpoint);
         debug!("   Model: {}", self.model_name);
         debug!("   Temperature: {}", temperature);
         debug!("   Max tokens: {}", max_tokens);
         debug!("   Timeout: {}s", timeout);
-        debug!("   API key: {}...{}", 
-               &api_key[..8.min(api_key.len())], 
-               if api_key.len() > 16 { &api_key[api_key.len()-8..] } else { "***" });
+        debug!(
+            "   API key: {}...{}",
+            &api_key[..8.min(api_key.len())],
+            if api_key.len() > 16 {
+                &api_key[api_key.len() - 8..]
+            } else {
+                "***"
+            }
+        );
 
         let request_body = json!({
             "model": self.model_name,
@@ -732,7 +757,7 @@ Example valid response: [{\"tool_name\": \"example\", \"found_issue\": true, \"i
         );
 
         debug!("📡 Sending LLM API request to: {}", endpoint);
-        
+
         let response = match client
             .post(endpoint)
             .header("Authorization", format!("Bearer {api_key}"))
@@ -740,14 +765,15 @@ Example valid response: [{\"tool_name\": \"example\", \"found_issue\": true, \"i
             .timeout(std::time::Duration::from_secs(timeout))
             .json(&request_body)
             .send()
-            .await {
+            .await
+        {
             Ok(resp) => resp,
             Err(e) => {
                 sp.stop();
                 error!("🚨 LLM API Request Failed:");
                 error!("   Endpoint: {}", endpoint);
                 error!("   Error: {}", e);
-                
+
                 if e.is_timeout() {
                     error!("   💡 Hint: Request timed out after {}s. Try increasing timeout in config.", timeout);
                 } else if e.is_connect() {
@@ -757,7 +783,7 @@ Example valid response: [{\"tool_name\": \"example\", \"found_issue\": true, \"i
                 } else {
                     error!("   💡 Hint: Network error occurred. Check connectivity and endpoint configuration.");
                 }
-                
+
                 return Err(anyhow!("LLM API network request failed: {}", e));
             }
         };
@@ -770,26 +796,40 @@ Example valid response: [{\"tool_name\": \"example\", \"found_issue\": true, \"i
 
         if !status.is_success() {
             // Get response body for better error diagnostics
-            let error_body = response.text().await.unwrap_or_else(|_| "Unable to read error response".to_string());
-            
+            let error_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unable to read error response".to_string());
+
             error!("🚨 LLM API Request Failed with Status: {}", status);
             error!("   Endpoint: {}", endpoint);
             error!("   Model: {}", self.model_name);
-            
+
             match status.as_u16() {
                 401 => {
                     error!("   🔑 Authentication Error: Invalid API key");
-                    error!("   💡 Hint: Check your API key is correct and has sufficient permissions");
-                    error!("   💡 Current key starts with: {}...", &api_key[..8.min(api_key.len())]);
+                    error!(
+                        "   💡 Hint: Check your API key is correct and has sufficient permissions"
+                    );
+                    error!(
+                        "   💡 Current key starts with: {}...",
+                        &api_key[..8.min(api_key.len())]
+                    );
                 }
                 403 => {
                     error!("   🚫 Authorization Error: API key lacks required permissions");
-                    error!("   💡 Hint: Ensure your API key has access to the {} model", self.model_name);
+                    error!(
+                        "   💡 Hint: Ensure your API key has access to the {} model",
+                        self.model_name
+                    );
                 }
                 404 => {
                     error!("   🔍 Not Found Error: Invalid endpoint or model");
                     error!("   💡 Hint: Check if endpoint '{}' is correct", endpoint);
-                    error!("   💡 Hint: Check if model '{}' is available", self.model_name);
+                    error!(
+                        "   💡 Hint: Check if model '{}' is available",
+                        self.model_name
+                    );
                 }
                 429 => {
                     error!("   ⏰ Rate Limit Error: Too many requests");
@@ -803,13 +843,20 @@ Example valid response: [{\"tool_name\": \"example\", \"found_issue\": true, \"i
                     error!("   ❓ Unexpected Error: {}", status);
                 }
             }
-            
+
             if !error_body.is_empty() && error_body.len() < 500 {
                 error!("   Response: {}", error_body);
             }
-            
-            return Err(anyhow!("LLM API request failed: {} - {}", status, 
-                              if error_body.len() > 100 { "See logs for details" } else { &error_body }));
+
+            return Err(anyhow!(
+                "LLM API request failed: {} - {}",
+                status,
+                if error_body.len() > 100 {
+                    "See logs for details"
+                } else {
+                    &error_body
+                }
+            ));
         }
 
         // Read response as text first to enable logging on parse failures
@@ -823,24 +870,32 @@ Example valid response: [{\"tool_name\": \"example\", \"found_issue\": true, \"i
             }
         };
 
-        debug!("📥 LLM API Raw Response: {}", 
-               if response_text.len() > 500 { 
-                   format!("{}... (truncated, {} chars total)", &response_text[..500], response_text.len())
-               } else { 
-                   response_text.clone() 
-               });
+        debug!(
+            "📥 LLM API Raw Response: {}",
+            if response_text.len() > 500 {
+                format!(
+                    "{}... (truncated, {} chars total)",
+                    &response_text[..500],
+                    response_text.len()
+                )
+            } else {
+                response_text.clone()
+            }
+        );
 
         let response_json: Value = match serde_json::from_str(&response_text) {
             Ok(json) => json,
             Err(e) => {
                 error!("🚨 LLM API Response Parsing Failed:");
                 error!("   Error: {}", e);
-                error!("   Raw Response Body: {}", 
-                       if response_text.len() > 1000 { 
-                           format!("{}... (truncated)", &response_text[..1000])
-                       } else { 
-                           response_text 
-                       });
+                error!(
+                    "   Raw Response Body: {}",
+                    if response_text.len() > 1000 {
+                        format!("{}... (truncated)", &response_text[..1000])
+                    } else {
+                        response_text
+                    }
+                );
                 error!("   💡 Hint: Response may not be valid JSON - check LLM provider status");
                 return Err(anyhow!("Failed to parse LLM response as JSON: {}", e));
             }
@@ -851,11 +906,17 @@ Example valid response: [{\"tool_name\": \"example\", \"found_issue\": true, \"i
             .ok_or_else(|| {
                 error!("🚨 LLM Response Format Error:");
                 error!("   Expected: choices[0].message.content");
-                error!("   Got: {}", serde_json::to_string_pretty(&response_json).unwrap_or_default());
+                error!(
+                    "   Got: {}",
+                    serde_json::to_string_pretty(&response_json).unwrap_or_default()
+                );
                 anyhow!("Invalid LLM response format: missing choices[0].message.content")
             })?;
 
-        debug!("✅ LLM API call successful, response length: {} chars", content.len());
+        debug!(
+            "✅ LLM API call successful, response length: {} chars",
+            content.len()
+        );
 
         if show_details {
             println!("\n🤖 LLM Response:");
