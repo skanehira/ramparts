@@ -12,9 +12,10 @@ use axum::{
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::signal;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Clone)]
 pub struct ServerState {
@@ -87,9 +88,44 @@ impl MCPScannerServer {
         debug!("Protocol version: 2025-06-18");
 
         let listener = tokio::net::TcpListener::bind(&addr).await?;
-        axum::serve(listener, app).await?;
 
+        // Set up graceful shutdown
+        info!("Server ready to handle graceful shutdown signals (SIGTERM, SIGINT)");
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
+
+        info!("Server shutdown complete");
         Ok(())
+    }
+}
+
+/// Shutdown signal handler that listens for SIGTERM and SIGINT
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            warn!("Received SIGINT (Ctrl+C), initiating graceful shutdown...");
+        }
+        _ = terminate => {
+            warn!("Received SIGTERM, initiating graceful shutdown...");
+        }
     }
 }
 
