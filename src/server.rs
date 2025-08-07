@@ -103,17 +103,31 @@ impl MCPScannerServer {
 /// Shutdown signal handler that listens for SIGTERM and SIGINT
 async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        match signal::ctrl_c().await {
+            Ok(()) => {
+                debug!("Ctrl+C signal handler installed successfully");
+            }
+            Err(e) => {
+                error!("Failed to install Ctrl+C handler: {}", e);
+                // Return a pending future to disable this signal handling
+                std::future::pending::<()>().await;
+            }
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut signal_handler) => {
+                debug!("SIGTERM signal handler installed successfully");
+                signal_handler.recv().await;
+            }
+            Err(e) => {
+                error!("Failed to install SIGTERM handler: {}", e);
+                // Return a pending future to disable this signal handling
+                std::future::pending::<()>().await;
+            }
+        }
     };
 
     #[cfg(not(unix))]
