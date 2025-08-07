@@ -5,6 +5,7 @@ pub mod cross_origin_scanner;
 use crate::constants::{messages, DEFAULT_LLM_BATCH_SIZE};
 use crate::types::{MCPPrompt, MCPResource, MCPTool};
 use anyhow::{anyhow, Result};
+use tracing::{debug, error};
 use reqwest::Client;
 use serde_json::{json, Value};
 use spinners::{Spinner, Spinners};
@@ -658,9 +659,20 @@ If no genuine security issues found, return empty array []."
 
     /// Query the LLM with the given prompt
     async fn query_llm(&self, prompt: &str, show_details: bool) -> Result<String> {
-        // Early validation of LLM configuration
+        // Enhanced validation with detailed error messages
         if !self.is_llm_configured() {
-            return Err(anyhow!("LLM not configured: missing endpoint or API key"));
+            let endpoint_status = if self.model_endpoint.is_some() { "✅" } else { "❌" };
+            let api_key_status = if self.api_key.is_some() { "✅" } else { "❌" };
+            
+            error!("🚨 LLM Configuration Check Failed:");
+            error!("   Endpoint configured: {} {}", endpoint_status, 
+                   self.model_endpoint.as_deref().unwrap_or("NOT SET"));
+            error!("   API key configured: {} {}", api_key_status,
+                   if self.api_key.is_some() { "SET (hidden)" } else { "NOT SET" });
+            error!("   💡 Hint: Set OPENAI_API_KEY environment variable or configure in ramparts.yaml");
+            
+            return Err(anyhow!("LLM not configured: missing endpoint ({}) or API key ({})", 
+                              endpoint_status, api_key_status));
         }
 
         let client = Client::new();
@@ -669,6 +681,19 @@ If no genuine security issues found, return empty array []."
         let temperature = self.config.as_ref().map_or(0.1, |c| c.llm.temperature);
         let max_tokens = self.config.as_ref().map_or(4000, |c| c.llm.max_tokens);
         let timeout = self.config.as_ref().map_or(30, |c| c.llm.timeout);
+
+        // Get validated LLM configuration
+        let (endpoint, api_key) = self.get_llm_config()?;
+        
+        debug!("🔧 LLM Configuration:");
+        debug!("   Endpoint: {}", endpoint);
+        debug!("   Model: {}", self.model_name);
+        debug!("   Temperature: {}", temperature);
+        debug!("   Max tokens: {}", max_tokens);
+        debug!("   Timeout: {}s", timeout);
+        debug!("   API key: {}...{}", 
+               &api_key[..8.min(api_key.len())], 
+               if api_key.len() > 16 { &api_key[api_key.len()-8..] } else { "***" });
 
         let request_body = json!({
             "model": self.model_name,
@@ -706,29 +731,107 @@ Example valid response: [{\"tool_name\": \"example\", \"found_issue\": true, \"i
             "Scanning for security vulnerabilities...(this may take a while)".into(),
         );
 
-        // Get validated LLM configuration
-        let (endpoint, api_key) = self.get_llm_config()?;
-
-        let response = client
+        debug!("📡 Sending LLM API request to: {}", endpoint);
+        
+        let response = match client
             .post(endpoint)
             .header("Authorization", format!("Bearer {api_key}"))
             .header("Content-Type", "application/json")
             .timeout(std::time::Duration::from_secs(timeout))
             .json(&request_body)
             .send()
-            .await?;
+            .await {
+            Ok(resp) => resp,
+            Err(e) => {
+                sp.stop();
+                error!("🚨 LLM API Request Failed:");
+                error!("   Endpoint: {}", endpoint);
+                error!("   Error: {}", e);
+                
+                if e.is_timeout() {
+                    error!("   💡 Hint: Request timed out after {}s. Try increasing timeout in config.", timeout);
+                } else if e.is_connect() {
+                    error!("   💡 Hint: Cannot connect to endpoint. Check your internet connection and endpoint URL.");
+                } else if e.to_string().contains("dns") {
+                    error!("   💡 Hint: DNS resolution failed. Check the endpoint URL.");
+                } else {
+                    error!("   💡 Hint: Network error occurred. Check connectivity and endpoint configuration.");
+                }
+                
+                return Err(anyhow!("LLM API network request failed: {}", e));
+            }
+        };
 
         // Stop spinner
         sp.stop();
 
-        if !response.status().is_success() {
-            return Err(anyhow!("LLM API request failed: {}", response.status()));
+        let status = response.status();
+        debug!("📥 LLM API Response Status: {}", status);
+
+        if !status.is_success() {
+            // Get response body for better error diagnostics
+            let error_body = response.text().await.unwrap_or_else(|_| "Unable to read error response".to_string());
+            
+            error!("🚨 LLM API Request Failed with Status: {}", status);
+            error!("   Endpoint: {}", endpoint);
+            error!("   Model: {}", self.model_name);
+            
+            match status.as_u16() {
+                401 => {
+                    error!("   🔑 Authentication Error: Invalid API key");
+                    error!("   💡 Hint: Check your API key is correct and has sufficient permissions");
+                    error!("   💡 Current key starts with: {}...", &api_key[..8.min(api_key.len())]);
+                }
+                403 => {
+                    error!("   🚫 Authorization Error: API key lacks required permissions");
+                    error!("   💡 Hint: Ensure your API key has access to the {} model", self.model_name);
+                }
+                404 => {
+                    error!("   🔍 Not Found Error: Invalid endpoint or model");
+                    error!("   💡 Hint: Check if endpoint '{}' is correct", endpoint);
+                    error!("   💡 Hint: Check if model '{}' is available", self.model_name);
+                }
+                429 => {
+                    error!("   ⏰ Rate Limit Error: Too many requests");
+                    error!("   💡 Hint: Reduce llm_batch_size in config or wait before retrying");
+                }
+                500..=599 => {
+                    error!("   🔥 Server Error: LLM provider is experiencing issues");
+                    error!("   💡 Hint: Try again later or check LLM provider status");
+                }
+                _ => {
+                    error!("   ❓ Unexpected Error: {}", status);
+                }
+            }
+            
+            if !error_body.is_empty() && error_body.len() < 500 {
+                error!("   Response: {}", error_body);
+            }
+            
+            return Err(anyhow!("LLM API request failed: {} - {}", status, 
+                              if error_body.len() > 100 { "See logs for details" } else { &error_body }));
         }
 
-        let response_json: Value = response.json().await?;
+        let response_json: Value = match response.json().await {
+            Ok(json) => json,
+            Err(e) => {
+                error!("🚨 LLM API Response Parsing Failed:");
+                error!("   Error: {}", e);
+                error!("   💡 Hint: Response may not be valid JSON");
+                return Err(anyhow!("Failed to parse LLM response as JSON: {}", e));
+            }
+        };
+
         let content = response_json["choices"][0]["message"]["content"]
             .as_str()
-            .ok_or_else(|| anyhow!("Invalid LLM response format"))?;
+            .ok_or_else(|| {
+                error!("🚨 LLM Response Format Error:");
+                error!("   Expected: choices[0].message.content");
+                error!("   Got: {}", serde_json::to_string_pretty(&response_json).unwrap_or_default());
+                anyhow!("Invalid LLM response format: missing choices[0].message.content")
+            })?;
+
+        debug!("✅ LLM API call successful, response length: {} chars", content.len());
 
         if show_details {
             println!("\n🤖 LLM Response:");
