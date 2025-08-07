@@ -812,12 +812,36 @@ Example valid response: [{\"tool_name\": \"example\", \"found_issue\": true, \"i
                               if error_body.len() > 100 { "See logs for details" } else { &error_body }));
         }
 
-        let response_json: Value = match response.json().await {
+        // Read response as text first to enable logging on parse failures
+        let response_text = match response.text().await {
+            Ok(text) => text,
+            Err(e) => {
+                error!("🚨 LLM API Response Read Failed:");
+                error!("   Error: {}", e);
+                error!("   💡 Hint: Unable to read response body");
+                return Err(anyhow!("Failed to read LLM response body: {}", e));
+            }
+        };
+
+        debug!("📥 LLM API Raw Response: {}", 
+               if response_text.len() > 500 { 
+                   format!("{}... (truncated, {} chars total)", &response_text[..500], response_text.len())
+               } else { 
+                   response_text.clone() 
+               });
+
+        let response_json: Value = match serde_json::from_str(&response_text) {
             Ok(json) => json,
             Err(e) => {
                 error!("🚨 LLM API Response Parsing Failed:");
                 error!("   Error: {}", e);
-                error!("   💡 Hint: Response may not be valid JSON");
+                error!("   Raw Response Body: {}", 
+                       if response_text.len() > 1000 { 
+                           format!("{}... (truncated)", &response_text[..1000])
+                       } else { 
+                           response_text 
+                       });
+                error!("   💡 Hint: Response may not be valid JSON - check LLM provider status");
                 return Err(anyhow!("Failed to parse LLM response as JSON: {}", e));
             }
         };
