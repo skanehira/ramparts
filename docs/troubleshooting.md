@@ -115,6 +115,8 @@ curl -H "Authorization: Bearer $TOKEN" <url>
 ramparts scan <url> --verbose
 ```
 
+
+
 ### STDIO Connection Problems
 
 **Issue: STDIO server not starting**

@@ -65,6 +65,9 @@ fn generate_context_message(item_type: &str, rule_name: &str) -> String {
         }
         "MixedSecuritySchemes" => format!("Mixed HTTP/HTTPS schemes detected in {item_type}"),
 
+        // Command injection rules
+        "CommandInjection" => format!("Command injection vulnerability detected in {item_type}"),
+
         // Default fallback
         _ => format!("{item_type} matched by security rule {rule_name}"),
     }
@@ -1266,61 +1269,123 @@ impl MCPScanner {
                 servers.len()
             );
 
-            for server in servers {
-                debug!(
-                    "Scanning MCP server: [\x1b[1m{}\x1b[0m] ({})",
-                    server.name.as_deref().unwrap_or("unnamed"),
-                    server.to_display_url()
-                );
+            // Parallel scanning implementation using futures
+            use futures::future::join_all;
 
-                // Extract IDE name from description if available
-                let ide_source = server
-                    .description
-                    .as_ref()
-                    .and_then(|desc| {
-                        // Look for [IDE:name] pattern in description
-                        if let Some(start) = desc.rfind("[IDE:") {
-                            if let Some(end) = desc[start..].find(']') {
-                                let ide_name = &desc[start + 5..start + end];
-                                return Some(ide_name.to_string());
+            // Create scanning tasks for parallel execution
+            let scan_tasks: Vec<_> = servers
+                .iter()
+                .map(|server| {
+                    let server = server.clone();
+                    let config = config.clone();
+                    let options = options.clone();
+                    // Clone the scanner (shares compiled YARA rules, creates new McpClient)
+                    let scanner = self.clone();
+
+                    tokio::spawn(async move {
+                        debug!(
+                            "Scanning MCP server: [\x1b[1m{}\x1b[0m] ({})",
+                            server.name.as_deref().unwrap_or("unnamed"),
+                            server.to_display_url()
+                        );
+
+                        // Extract IDE name from description if available
+                        let ide_source = server
+                            .description
+                            .as_ref()
+                            .and_then(|desc| {
+                                // Look for [IDE:name] pattern in description
+                                if let Some(start) = desc.rfind("[IDE:") {
+                                    if let Some(end) = desc[start..].find(']') {
+                                        let ide_name = &desc[start + 5..start + end];
+                                        return Some(ide_name.to_string());
+                                    }
+                                }
+                                None
+                            })
+                            .unwrap_or_else(|| "IDE Configs".to_string());
+
+                        let server_options =
+                            MCPScanner::build_server_options(&options, &config, &server);
+
+                        // Scan the MCP server - HTTP or STDIO
+                        let result = if let Some(url) = server.scan_url() {
+                            // HTTP server scanning
+                            match scanner.scan_single(url, server_options).await {
+                                Ok(mut result) => {
+                                    result.ide_source = Some(ide_source);
+                                    result
+                                }
+                                Err(e) => {
+                                    let mut failed_result = ScanResult::new(url.to_string());
+                                    failed_result.status = ScanStatus::Failed(e.to_string());
+                                    failed_result.ide_source = Some(ide_source);
+                                    failed_result
+                                }
                             }
-                        }
-                        None
+                        } else if server.command.is_some() {
+                            // STDIO server scanning
+                            match scanner.scan_stdio_server(&server, server_options).await {
+                                Ok(mut result) => {
+                                    result.ide_source = Some(ide_source);
+                                    result
+                                }
+                                Err(e) => {
+                                    let mut failed_result =
+                                        ScanResult::new(server.to_display_url());
+                                    failed_result.status = ScanStatus::Failed(e.to_string());
+                                    failed_result.ide_source = Some(ide_source);
+                                    failed_result
+                                }
+                            }
+                        } else {
+                            // Invalid server configuration
+                            let mut failed_result = ScanResult::new("unknown".to_string());
+                            failed_result.status =
+                                ScanStatus::Failed("Invalid server configuration".to_string());
+                            failed_result.ide_source = Some(ide_source);
+                            failed_result
+                        };
+
+                        result
                     })
-                    .unwrap_or_else(|| "IDE Configs".to_string());
+                })
+                .collect();
 
-                let server_options = Self::build_server_options(&options, &config, server);
+            // Execute all scans in parallel and collect results
+            println!(
+                "🚀 Starting parallel scan of {} servers...",
+                scan_tasks.len()
+            );
 
-                // Scan the MCP server - HTTP or STDIO
-                if let Some(url) = server.scan_url() {
-                    // HTTP server scanning
-                    match self.scan_single(url, server_options).await {
-                        Ok(mut result) => {
-                            result.ide_source = Some(ide_source.clone());
-                            results.push(result);
-                        }
-                        Err(e) => {
-                            let mut failed_result = ScanResult::new(url.to_string());
-                            failed_result.status = ScanStatus::Failed(e.to_string());
-                            failed_result.ide_source = Some(ide_source.clone());
-                            results.push(failed_result);
-                        }
-                    }
-                } else if server.command.is_some() {
-                    // STDIO server scanning
-                    match self.scan_stdio_server(server, server_options).await {
-                        Ok(mut result) => {
-                            result.ide_source = Some(ide_source.clone());
-                            results.push(result);
-                        }
-                        Err(e) => {
-                            let mut failed_result = ScanResult::new(server.to_display_url());
-                            failed_result.status = ScanStatus::Failed(e.to_string());
-                            failed_result.ide_source = Some(ide_source.clone());
-                            results.push(failed_result);
-                        }
+            // Add timeout to prevent tasks from hanging indefinitely
+            let scan_results = tokio::time::timeout(
+                std::time::Duration::from_secs(300), // 5 minute timeout for all tasks
+                join_all(scan_tasks),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                warn!("Parallel scan tasks timed out after 5 minutes");
+                vec![] // Return empty results if timeout
+            });
+
+            // Extract results from join handles
+            for task_result in scan_results {
+                match task_result {
+                    Ok(scan_result) => results.push(scan_result),
+                    Err(e) => {
+                        // Task panicked or was cancelled
+                        let mut failed_result = ScanResult::new("task_failed".to_string());
+                        failed_result.status = ScanStatus::Failed(format!("Scan task failed: {e}"));
+                        failed_result.ide_source = Some("IDE Configs".to_string());
+                        results.push(failed_result);
                     }
                 }
+            }
+
+            // Clean up the main scanner after all parallel tasks complete
+            if let Err(e) = self.mcp_client.cleanup_all_sessions().await {
+                warn!("Failed to clean up main scanner sessions after parallel scan: {e}");
             }
         }
 
@@ -1480,6 +1545,11 @@ impl MCPScanner {
         // Store fetch errors in scan_data for later inclusion in final result
         scan_data.fetch_errors = fetch_errors;
 
+        // Clean up the session to prevent session deletion errors
+        if let Err(e) = self.mcp_client.cleanup_session(&session).await {
+            warn!("Failed to clean up MCP session: {}", e);
+        }
+
         Ok(scan_data)
     }
 
@@ -1552,6 +1622,11 @@ impl MCPScanner {
         // Store fetch errors in scan_data for later inclusion in final result
         scan_data.fetch_errors = fetch_errors;
 
+        // Clean up the session to prevent session deletion errors
+        if let Err(e) = self.mcp_client.cleanup_session(session).await {
+            warn!("Failed to clean up MCP session: {}", e);
+        }
+
         Ok(scan_data)
     }
 
@@ -1601,6 +1676,15 @@ impl ScanData {
             yara_results: Vec::new(),
             fetch_errors: Vec::new(),
         }
+    }
+}
+
+// Implement Drop for MCPScanner to ensure proper cleanup
+impl Drop for MCPScanner {
+    fn drop(&mut self) {
+        // Disable automatic cleanup in Drop to prevent race conditions in parallel scanning
+        // Cleanup is now handled explicitly in scan methods
+        debug!("MCPScanner dropped");
     }
 }
 

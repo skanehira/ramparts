@@ -1,6 +1,6 @@
 [package]
 name = "ramparts"
-version = "0.6.9"
+version = "0.7.0"
 edition = "2021"
 authors = ["Sharath Rajasekar <sharath@getjavelin.com>"]
 description = "A CLI tool for scanning Model Context Protocol (MCP) servers"
@@ -40,6 +40,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], defau
 
 # Async streams
 futures-util = "0.3"
+futures = "0.3"
 
 # JSON handling
 serde = { version = "1.0", features = ["derive"] }

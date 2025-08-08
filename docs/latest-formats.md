@@ -267,11 +267,13 @@ Ramparts performs comprehensive security analysis on all discovered MCP servers:
 
 ## Version Compatibility
 
-- **Ramparts**: v0.6.3+
+- **Ramparts**: Latest version
 - **MCP Protocol**: 2025-03-26
 - **Node.js Servers**: All versions with MCP support
 - **Python Servers**: All versions with MCP support
 - **HTTP Servers**: Standard HTTP/HTTPS with MCP protocol
+
+
 
 ## Contributing
 

@@ -38,6 +38,8 @@ ramparts server --port 8080 --host 0.0.0.0
 
 Once started, the server provides a REST API with the following endpoints:
 
+
+
 ## API Endpoints
 
 ### 1. Health Check
@@ -233,67 +235,69 @@ curl -X POST http://localhost:3000/scan \
         "parameters": {},
         "category": "file_system",
         "tags": ["write", "create"],
-        "deprecated": false
+        "deprecated": false,
+        "llm_analysis": "The create_file tool accepts a path parameter that could be vulnerable to path traversal attacks if not properly validated.",
+        "security_scan_results": [
+          {
+            "scan_type": "llm_analysis",
+            "issue_type": "PathTraversal",
+            "severity": "HIGH",
+            "message": "Tool vulnerable to path traversal attacks",
+            "description": "Tool allows potential path traversal attacks",
+            "details": "The path parameter is not validated, allowing potential directory traversal"
+          },
+          {
+            "scan_type": "yara_rules",
+            "rule_name": "PathTraversalVulnerability",
+            "rule_file": "path_traversal",
+            "context": "Path traversal vulnerability detected in tool",
+            "rule_metadata": {
+              "severity": "HIGH",
+              "description": "Detects potential path traversal vulnerabilities"
+            }
+          }
+        ]
       }
     ],
     "resources": [],
     "prompts": [],
     "security_issues": {
-      "total_issues": 1,
-      "critical_count": 0,
-      "high_count": 1,
-      "medium_count": 0,
-      "low_count": 0,
-      "tool_issues": [
+      "issues": [
         {
-          "tool_name": "create_file",
+          "scan_type": "llm_analysis",
+          "target_type": "tool",
+          "target_name": "create_file",
+          "issue_type": "PathTraversal",
           "severity": "HIGH",
-          "issue_type": "path_traversal",
-          "message": "Tool allows potential path traversal attacks",
-          "details": "The 'path' parameter lacks proper validation"
+          "message": "Tool vulnerable to path traversal attacks",
+          "description": "Tool allows potential path traversal attacks",
+          "details": "The path parameter is not validated, allowing potential directory traversal"
+        },
+        {
+          "scan_type": "yara_rules",
+          "target_type": "tool",
+          "target_name": "create_file",
+          "rule_name": "PathTraversalVulnerability",
+          "rule_file": "path_traversal",
+          "context": "Path traversal vulnerability detected in tool",
+          "rule_metadata": {
+            "severity": "HIGH",
+            "description": "Detects potential path traversal vulnerabilities"
+          }
         }
       ],
-      "prompt_issues": [],
-      "resource_issues": []
+      "llm_issues_count": 1,
+      "yara_issues_count": 1,
+      "total_issues_count": 2
     },
-    "yara_results": [
-      {
-        "target_type": "tool",
-        "target_name": "create_file",
-        "rule_name": "PathTraversalVulnerability",
-        "rule_file": "path_traversal",
-        "context": "Path traversal vulnerability detected in tool",
-        "rule_metadata": {
-          "name": "Path Traversal Detection",
-          "author": "Ramparts Security Team",
-          "version": "1.0",
-          "description": "Detects potential path traversal vulnerabilities in file operations",
-          "severity": "HIGH",
-          "category": "path-traversal,security,file-access"
-        },
-        "status": "warning"
-      },
-      {
-        "target_type": "summary",
-        "target_name": "pre-scan",
-        "rule_name": "YARA_PRE_SCAN_SUMMARY",
-        "context": "Pre-scan completed: 5 rules executed on 1 items",
-        "phase": "pre-scan",
-        "rules_executed": [
-          "command_injection:*",
-          "cross_origin_escalation:*", 
-          "secrets_leakage:*",
-          "sql_injection:*",
-          "path_traversal:*"
-        ],
-        "security_issues_detected": [
-          "path_traversal:PathTraversalVulnerability"
-        ],
-        "total_items_scanned": 1,
-        "total_matches": 1,
-        "status": "warning"
-      }
-    ],
+    "security_scan_summary": {
+      "total_security_issues": 2,
+      "llm_scan_issues": 1,
+      "yara_scan_issues": 1,
+      "tool_issues": 1,
+      "resource_issues": 0,
+      "prompt_issues": 0
+    },
     "errors": []
   },
   "error": null,
@@ -406,8 +410,7 @@ curl -X POST http://localhost:3000/batch-scan \
         "tools": [ /* Tools array */ ],
         "resources": [],
         "prompts": [],
-        "security_issues": { /* Security issues object */ },
-        "yara_results": [ /* YARA results array */ ],
+        "security_scan_summary": { /* Security scan summary */ },
         "errors": []
       },
       "error": null,
@@ -424,8 +427,7 @@ curl -X POST http://localhost:3000/batch-scan \
         "tools": [],
         "resources": [],
         "prompts": [],
-        "security_issues": null,
-        "yara_results": [],
+        "security_scan_summary": null,
         "errors": ["Scan operation failed: Failed to initialize MCP session with any protocol version"]
       },
       "error": null,

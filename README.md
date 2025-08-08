@@ -101,49 +101,23 @@ ramparts scan https://api.githubcopilot.com/mcp/ --auth-headers "Authorization: 
 RAMPARTS
 MCP Security Scanner
 
-Version: 0.6.9
+Version: 0.7.0
 Current Time: 2025-08-04 07:32:19 UTC
 Git Commit: 9d0c37c
 
 🌐 GitHub Copilot MCP Server
   ✅ All tools passed security checks
 
-  └── push_files passed
-  └── create_or_update_file warning
-      📋 Analysis: Standard GitHub file creation/update functionality
-      ├── HIGH: Tool allowing directory traversal attacks: Potential Path Traversal Vulnerability
-      │   Details: The tool accepts a 'path' parameter without proper validation, allowing potential path traversal attacks.
-
-YARA Scan Results
-================================================================================
-⚠️ PRE-SCAN - WARNING
-  Context: Pre-scan completed: 5 rules executed on 83 items
-  Items scanned: 83
-  Security matches: 2
-  Rules executed: secrets_leakage:*, command_injection:*, path_traversal:*, sql_injection:*, cross_origin_escalation:*
-  Security issues detected: secrets_leakage:EnvironmentVariableLeakage
-
-🔍 Detailed Results:
-⚠️ get_secret_scanning_alert (tool)
-  Rule: EnvironmentVariableLeakage (HIGH)
-  Name: Environment Variable Leakage
-  Description: Detects exposure of sensitive environment variables and API keys
-  Author: Ramparts Security Team
-  Version: 1.0
-  Context: Sensitive environment variable pattern detected in tool
-
-⚠️ list_secret_scanning_alerts (tool)  
-  Rule: EnvironmentVariableLeakage (HIGH)
-  Name: Environment Variable Leakage
-  Description: Detects exposure of sensitive environment variables and API keys
-  Author: Ramparts Security Team
-  Version: 1.0
-  Context: Sensitive environment variable pattern detected in tool
+  └── push_files ✅ passed
+  └── create_or_update_file ⚠️ 2 warnings
+      │   └── 🟠 HIGH (LLM): Tool allowing directory traversal attacks
+      │   └── 🟠 HIGH (YARA): EnvironmentVariableLeakage
+  └── get_secret_scanning_alert ⚠️ 1 warning
+      │   └── 🟠 HIGH (YARA): EnvironmentVariableLeakage
 
 Summary:
   • Tools scanned: 83
-  • Security matches: 2 high-severity findings
-================================================================================
+  • Security issues: 3 findings
 ```
 
 **IDE configuration scan:**
