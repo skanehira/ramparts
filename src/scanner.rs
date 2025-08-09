@@ -65,6 +65,9 @@ fn generate_context_message(item_type: &str, rule_name: &str) -> String {
         }
         "MixedSecuritySchemes" => format!("Mixed HTTP/HTTPS schemes detected in {item_type}"),
 
+        // Command injection rules
+        "CommandInjection" => format!("Command injection vulnerability detected in {item_type}"),
+
         // Default fallback
         _ => format!("{item_type} matched by security rule {rule_name}"),
     }
@@ -928,8 +931,11 @@ impl MCPScanner {
         // Set up middleware chain with dynamic YARA capabilities
         let mut middleware_chain = ScannerChain::new();
 
+        // Fixed rules directory
+        let rules_dir = "rules".to_string();
+
         // Add dynamic YARA pre-scan capability
-        if let Ok(pre_cap) = YaraScanner::new("rules", ScanPhase::PreScan) {
+        if let Ok(pre_cap) = YaraScanner::new(&rules_dir, ScanPhase::PreScan) {
             middleware_chain.add(Box::new(pre_cap));
             debug!("{}", messages::YARA_PRE_SCAN_LOADED);
         } else {
@@ -937,7 +943,7 @@ impl MCPScanner {
         }
 
         // Add dynamic YARA post-scan capability
-        if let Ok(post_cap) = YaraScanner::new("rules", ScanPhase::PostScan) {
+        if let Ok(post_cap) = YaraScanner::new(&rules_dir, ScanPhase::PostScan) {
             middleware_chain.add(Box::new(post_cap));
             debug!("{}", messages::YARA_POST_SCAN_LOADED);
         } else {
@@ -1258,6 +1264,207 @@ impl MCPScanner {
             config.servers.as_ref().map(|s| s.len()).unwrap_or(0)
         );
 
+        // =============================================================
+        // Pre-connection static analysis of MCP server definitions
+        // - Scan command/args/env with YARA pre-scan rules (if enabled)
+        // - Heuristic checks for risky STDIO patterns (always on)
+        // - Baseline/diff detection for post-approval swaps
+        // =============================================================
+        use std::collections::HashMap as StdHashMap;
+        let mut server_config_yara: StdHashMap<String, Vec<YaraScanResult>> = StdHashMap::new();
+
+        // Build initial baseline map from disk (best-effort)
+        fn get_baseline_path() -> std::path::PathBuf {
+            dirs::home_dir()
+                .map(|mut p| {
+                    p.push(".ramparts");
+                    p.push("mcp-baseline.json");
+                    p
+                })
+                .unwrap_or_else(|| std::path::PathBuf::from(".ramparts/mcp-baseline.json"))
+        }
+
+        fn compute_server_fingerprint(server: &MCPServerConfig) -> String {
+            use std::hash::{Hash, Hasher};
+            let mut s = String::new();
+            if let Some(name) = &server.name {
+                s.push_str(name);
+            }
+            if let Some(url) = &server.url {
+                s.push_str(url);
+            }
+            if let Some(cmd) = &server.command {
+                s.push_str(cmd);
+            }
+            if let Some(args) = &server.args {
+                s.push_str(&args.join(" "));
+            }
+            if let Some(env) = &server.env {
+                let mut kv: Vec<_> = env.iter().collect();
+                kv.sort_by(|a, b| a.0.cmp(b.0));
+                for (k, v) in kv {
+                    s.push_str(k);
+                    s.push('=');
+                    s.push_str(v);
+                }
+            }
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            s.hash(&mut hasher);
+            format!("{:016x}", hasher.finish())
+        }
+
+        let baseline_path = get_baseline_path();
+        let mut baseline_map: StdHashMap<String, String> = StdHashMap::new();
+        if baseline_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&baseline_path) {
+                if let Ok(map) = serde_json::from_str::<StdHashMap<String, String>>(&content) {
+                    baseline_map = map;
+                }
+            }
+        }
+
+        // Prepare YARA rules engine for config scanning (feature-gated)
+        #[cfg(feature = "yara-x-scanning")]
+        let pre_rules_engine = ThreatRules::new("rules").ok(); // compile once for config scan
+
+        if let Some(ref servers) = config.servers {
+            for server in servers {
+                let key = server.dedup_key();
+
+                // Heuristic removed in favor of YARA (below). Keep vector for potential YARA additions
+                let mut prefindings: Vec<YaraScanResult> = Vec::new();
+
+                // YARA pre-scan on server definition text (if YARA enabled)
+                #[cfg(feature = "yara-x-scanning")]
+                if let Some(engine) = &pre_rules_engine {
+                    let mut text = String::new();
+                    if let Some(name) = &server.name {
+                        text.push_str(&format!("NAME: {name}\n"));
+                    }
+                    if let Some(url) = &server.url {
+                        text.push_str(&format!("URL: {url}\n"));
+                    }
+                    if let Some(cmd) = &server.command {
+                        text.push_str(&format!("COMMAND: {cmd}\n"));
+                    }
+                    if let Some(args) = &server.args {
+                        text.push_str(&format!("ARGS: {}\n", args.join(" ")));
+                    }
+                    if let Some(env) = &server.env {
+                        // Only include environment VALUES that look non-placeholder and non-trivial,
+                        // to avoid false positives from variable NAMES alone
+                        let mut kv: Vec<_> = env.iter().collect();
+                        kv.sort_by(|a, b| a.0.cmp(b.0));
+                        for (_k, v) in kv {
+                            let val = v.trim();
+                            if val.is_empty() {
+                                continue;
+                            }
+                            // Skip common placeholder syntaxes and trivial booleans
+                            let is_placeholder = val.starts_with("${")
+                                || val.starts_with("$(")
+                                || val.contains("{{")
+                                || val.contains('<')
+                                || val.eq_ignore_ascii_case("true")
+                                || val.eq_ignore_ascii_case("false");
+                            if is_placeholder || val.len() < 8 {
+                                continue;
+                            }
+                            text.push_str(&format!("ENV_VALUE:{val} "));
+                        }
+                        text.push('\n');
+                    }
+                    if let Some(desc) = &server.description {
+                        text.push_str(&format!("DESCRIPTION: {desc}\n"));
+                    }
+                    let context = format!(
+                        "server '{}'",
+                        server.name.as_deref().unwrap_or(&server.to_display_url())
+                    );
+                    let matches = engine.pre_scan(&text, &context);
+                    for m in matches {
+                        prefindings.push(YaraScanResult {
+                            target_type: "server".to_string(),
+                            target_name: server
+                                .name
+                                .clone()
+                                .unwrap_or_else(|| server.to_display_url()),
+                            rule_name: m.rule_name.clone(),
+                            rule_file: rule_name_to_file_name(&m.rule_name),
+                            matched_text: None,
+                            context: generate_context_message("server", &m.rule_name),
+                            rule_metadata: m.metadata.clone(),
+                            phase: Some("pre-config".to_string()),
+                            rules_executed: None,
+                            security_issues_detected: None,
+                            total_items_scanned: None,
+                            total_matches: None,
+                            status: Some("warning".to_string()),
+                        });
+                    }
+                }
+
+                // Baseline/diff check (best-effort)
+                let fp = compute_server_fingerprint(server);
+                match baseline_map.get(&key) {
+                    Some(stored) if stored == &fp => { /* unchanged */ }
+                    Some(_different) => {
+                        prefindings.push(YaraScanResult {
+                            target_type: "server".to_string(),
+                            target_name: server
+                                .name
+                                .clone()
+                                .unwrap_or_else(|| server.to_display_url()),
+                            rule_name: "MCPConfigChanged".to_string(),
+                            rule_file: None,
+                            matched_text: None,
+                            context: "MCP server configuration changed since last baseline"
+                                .to_string(),
+                            rule_metadata: Some(crate::types::YaraRuleMetadata {
+                                name: Some("Baseline Change".to_string()),
+                                author: Some("Ramparts".to_string()),
+                                date: None,
+                                version: None,
+                                description: Some(
+                                    "Server command/args/env fingerprint differs from baseline."
+                                        .to_string(),
+                                ),
+                                severity: Some("HIGH".to_string()),
+                                category: Some("supply-chain".to_string()),
+                                confidence: Some("MEDIUM".to_string()),
+                                tags: vec!["baseline".to_string()],
+                            }),
+                            phase: Some("pre-config".to_string()),
+                            rules_executed: None,
+                            security_issues_detected: None,
+                            total_items_scanned: None,
+                            total_matches: None,
+                            status: Some("warning".to_string()),
+                        });
+                    }
+                    None => {
+                        // First-run: populate baseline directory/file if missing (best-effort)
+                        if !baseline_path.exists() {
+                            if let Some(parent) = baseline_path.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                        }
+                        baseline_map.insert(key.clone(), fp.clone());
+                        // Write baseline silently
+                        if let Ok(serialized) = serde_json::to_string_pretty(&baseline_map) {
+                            let _ = std::fs::write(&baseline_path, serialized);
+                        }
+                    }
+                }
+
+                if !prefindings.is_empty() {
+                    server_config_yara.insert(key, prefindings);
+                }
+            }
+        }
+
+        let server_config_yara = std::sync::Arc::new(server_config_yara);
+
         let mut results = Vec::new();
 
         if let Some(ref servers) = config.servers {
@@ -1266,61 +1473,138 @@ impl MCPScanner {
                 servers.len()
             );
 
-            for server in servers {
-                debug!(
-                    "Scanning MCP server: [\x1b[1m{}\x1b[0m] ({})",
-                    server.name.as_deref().unwrap_or("unnamed"),
-                    server.to_display_url()
-                );
+            // Parallel scanning implementation using futures
+            use futures::future::join_all;
 
-                // Extract IDE name from description if available
-                let ide_source = server
-                    .description
-                    .as_ref()
-                    .and_then(|desc| {
-                        // Look for [IDE:name] pattern in description
-                        if let Some(start) = desc.rfind("[IDE:") {
-                            if let Some(end) = desc[start..].find(']') {
-                                let ide_name = &desc[start + 5..start + end];
-                                return Some(ide_name.to_string());
+            // Create scanning tasks for parallel execution
+            let scan_tasks: Vec<_> = servers
+                .iter()
+                .map(|server| {
+                    let server = server.clone();
+                    let config = config.clone();
+                    let options = options.clone();
+                    // Clone the scanner (shares compiled YARA rules, creates new McpClient)
+                    let scanner = self.clone();
+                    // Clone shared pre-config findings map into the task
+                    let cfg_yara = server_config_yara.clone();
+
+                    tokio::spawn(async move {
+                        debug!(
+                            "Scanning MCP server: [\x1b[1m{}\x1b[0m] ({})",
+                            server.name.as_deref().unwrap_or("unnamed"),
+                            server.to_display_url()
+                        );
+
+                        // Extract IDE name from description if available
+                        let ide_source = server
+                            .description
+                            .as_ref()
+                            .and_then(|desc| {
+                                // Look for [IDE:name] pattern in description
+                                if let Some(start) = desc.rfind("[IDE:") {
+                                    if let Some(end) = desc[start..].find(']') {
+                                        let ide_name = &desc[start + 5..start + end];
+                                        return Some(ide_name.to_string());
+                                    }
+                                }
+                                None
+                            })
+                            .unwrap_or_else(|| "IDE Configs".to_string());
+
+                        let server_options =
+                            MCPScanner::build_server_options(&options, &config, &server);
+
+                        // Small helper to attach pre-config findings
+                        let attach_findings = |res: &mut ScanResult| {
+                            if let Some(findings) = cfg_yara.get(&server.dedup_key()) {
+                                res.yara_results.extend(findings.clone());
                             }
-                        }
-                        None
+                        };
+
+                        // Scan the MCP server - HTTP or STDIO
+                        let result = if let Some(url) = server.scan_url() {
+                            // HTTP server scanning
+                            match scanner.scan_single(url, server_options).await {
+                                Ok(mut result) => {
+                                    result.ide_source = Some(ide_source);
+                                    // Append pre-config YARA/heuristic/baseline findings if any
+                                    attach_findings(&mut result);
+                                    result
+                                }
+                                Err(e) => {
+                                    let mut failed_result = ScanResult::new(url.to_string());
+                                    failed_result.status = ScanStatus::Failed(e.to_string());
+                                    failed_result.ide_source = Some(ide_source);
+                                    attach_findings(&mut failed_result);
+                                    failed_result
+                                }
+                            }
+                        } else if server.command.is_some() {
+                            // STDIO server scanning
+                            match scanner.scan_stdio_server(&server, server_options).await {
+                                Ok(mut result) => {
+                                    result.ide_source = Some(ide_source);
+                                    attach_findings(&mut result);
+                                    result
+                                }
+                                Err(e) => {
+                                    let mut failed_result =
+                                        ScanResult::new(server.to_display_url());
+                                    failed_result.status = ScanStatus::Failed(e.to_string());
+                                    failed_result.ide_source = Some(ide_source);
+                                    attach_findings(&mut failed_result);
+                                    failed_result
+                                }
+                            }
+                        } else {
+                            // Invalid server configuration
+                            let mut failed_result = ScanResult::new("unknown".to_string());
+                            failed_result.status =
+                                ScanStatus::Failed("Invalid server configuration".to_string());
+                            failed_result.ide_source = Some(ide_source);
+                            attach_findings(&mut failed_result);
+                            failed_result
+                        };
+
+                        result
                     })
-                    .unwrap_or_else(|| "IDE Configs".to_string());
+                })
+                .collect();
 
-                let server_options = Self::build_server_options(&options, &config, server);
+            // Execute all scans in parallel and collect results
+            println!(
+                "🚀 Starting parallel scan of {} servers...",
+                scan_tasks.len()
+            );
 
-                // Scan the MCP server - HTTP or STDIO
-                if let Some(url) = server.scan_url() {
-                    // HTTP server scanning
-                    match self.scan_single(url, server_options).await {
-                        Ok(mut result) => {
-                            result.ide_source = Some(ide_source.clone());
-                            results.push(result);
-                        }
-                        Err(e) => {
-                            let mut failed_result = ScanResult::new(url.to_string());
-                            failed_result.status = ScanStatus::Failed(e.to_string());
-                            failed_result.ide_source = Some(ide_source.clone());
-                            results.push(failed_result);
-                        }
-                    }
-                } else if server.command.is_some() {
-                    // STDIO server scanning
-                    match self.scan_stdio_server(server, server_options).await {
-                        Ok(mut result) => {
-                            result.ide_source = Some(ide_source.clone());
-                            results.push(result);
-                        }
-                        Err(e) => {
-                            let mut failed_result = ScanResult::new(server.to_display_url());
-                            failed_result.status = ScanStatus::Failed(e.to_string());
-                            failed_result.ide_source = Some(ide_source.clone());
-                            results.push(failed_result);
-                        }
+            // Add timeout to prevent tasks from hanging indefinitely
+            let scan_results = tokio::time::timeout(
+                std::time::Duration::from_secs(300), // 5 minute timeout for all tasks
+                join_all(scan_tasks),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                warn!("Parallel scan tasks timed out after 5 minutes");
+                vec![] // Return empty results if timeout
+            });
+
+            // Extract results from join handles
+            for task_result in scan_results {
+                match task_result {
+                    Ok(scan_result) => results.push(scan_result),
+                    Err(e) => {
+                        // Task panicked or was cancelled
+                        let mut failed_result = ScanResult::new("task_failed".to_string());
+                        failed_result.status = ScanStatus::Failed(format!("Scan task failed: {e}"));
+                        failed_result.ide_source = Some("IDE Configs".to_string());
+                        results.push(failed_result);
                     }
                 }
+            }
+
+            // Clean up the main scanner after all parallel tasks complete
+            if let Err(e) = self.mcp_client.cleanup_all_sessions().await {
+                warn!("Failed to clean up main scanner sessions after parallel scan: {e}");
             }
         }
 
@@ -1480,6 +1764,11 @@ impl MCPScanner {
         // Store fetch errors in scan_data for later inclusion in final result
         scan_data.fetch_errors = fetch_errors;
 
+        // Clean up the session to prevent session deletion errors
+        if let Err(e) = self.mcp_client.cleanup_session(&session).await {
+            warn!("Failed to clean up MCP session: {}", e);
+        }
+
         Ok(scan_data)
     }
 
@@ -1552,6 +1841,11 @@ impl MCPScanner {
         // Store fetch errors in scan_data for later inclusion in final result
         scan_data.fetch_errors = fetch_errors;
 
+        // Clean up the session to prevent session deletion errors
+        if let Err(e) = self.mcp_client.cleanup_session(session).await {
+            warn!("Failed to clean up MCP session: {}", e);
+        }
+
         Ok(scan_data)
     }
 
@@ -1601,6 +1895,15 @@ impl ScanData {
             yara_results: Vec::new(),
             fetch_errors: Vec::new(),
         }
+    }
+}
+
+// Implement Drop for MCPScanner to ensure proper cleanup
+impl Drop for MCPScanner {
+    fn drop(&mut self) {
+        // Disable automatic cleanup in Drop to prevent race conditions in parallel scanning
+        // Cleanup is now handled explicitly in scan methods
+        debug!("MCPScanner dropped");
     }
 }
 

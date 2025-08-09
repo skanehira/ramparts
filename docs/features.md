@@ -111,11 +111,15 @@ ramparts scan "stdio:///usr/local/bin/python3:/path/to/server.py"
 
 ### Flexible Output Formats
 
-The default table format gives you a nice tree view of security issues with color coding for severity levels. When you need to integrate with other tools, JSON format provides structured data that's easy to parse and filter.
+The default table format gives you a nice tree view of security issues with color coding for severity levels and inline details formatting for better readability.
+
+When you need to integrate with other tools, JSON format provides structured data that's easy to parse and filter.
 
 For debugging MCP protocol issues, raw format shows you exactly what the server responded with, which is invaluable when you're trying to figure out why something isn't working as expected.
 
 The JSON structure is designed to be jq-friendly, so you can easily extract issue counts, filter by severity, or pull out specific findings for reporting.
+
+
 
 ### IDE Integration
 
@@ -158,6 +162,8 @@ scanner:
   max_retries: 3             # Retry failed requests
   http_timeout: 30           # HTTP request timeout
 ```
+
+
 
 For environments with strict rate limits, you can dial down the concurrency and add delays between requests. For fast internal networks, you can crank up the parallelism for faster scanning.
 

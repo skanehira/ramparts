@@ -22,6 +22,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 /// MCP client using the official Rust MCP SDK with full transport support
+#[derive(Clone)]
 pub struct McpClient {
     /// Store active MCP services by endpoint
     services: Arc<Mutex<HashMap<String, RunningService<RoleClient, ()>>>>,
@@ -912,6 +913,46 @@ impl McpClient {
             mcp_prompts.len()
         );
         Ok(mcp_prompts)
+    }
+
+    /// Clean up and shut down a specific MCP session
+    pub async fn cleanup_session(&self, session: &MCPSession) -> Result<()> {
+        debug!("Cleaning up MCP session for: {}", session.endpoint_url);
+
+        let mut services = self.services.lock().await;
+        if let Some(service) = services.remove(&session.endpoint_url) {
+            debug!("Shutting down MCP service for: {}", session.endpoint_url);
+            // The service will be dropped and cleaned up automatically
+            drop(service);
+        }
+
+        Ok(())
+    }
+
+    /// Clean up all active MCP sessions
+    pub async fn cleanup_all_sessions(&self) -> Result<()> {
+        debug!("Cleaning up all MCP sessions");
+
+        let mut services = self.services.lock().await;
+        let endpoints: Vec<String> = services.keys().cloned().collect();
+
+        for endpoint in endpoints {
+            if let Some(service) = services.remove(&endpoint) {
+                debug!("Shutting down MCP service for: {}", endpoint);
+                // Add timeout for cleanup to prevent hanging
+                let cleanup_timeout =
+                    tokio::time::timeout(std::time::Duration::from_millis(500), async move {
+                        drop(service);
+                    });
+
+                if cleanup_timeout.await.is_err() {
+                    warn!("Cleanup timeout for MCP service: {}", endpoint);
+                }
+            }
+        }
+
+        debug!("All MCP sessions cleaned up");
+        Ok(())
     }
 
     /// Generic JSON-RPC request helper for simple HTTP transport

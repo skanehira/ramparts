@@ -795,6 +795,12 @@ impl MCPConfigManager {
             current_dir.join(".cursor").join("settings.json"),
             MCPClient::Cursor,
         ));
+        // Cursor repo-embedded MCP configuration used by some editors
+        // Example: .cursor/rules/mcp.json (supply-chain sensitive)
+        paths.push((
+            current_dir.join(".cursor").join("rules").join("mcp.json"),
+            MCPClient::Cursor,
+        ));
 
         // Claude Code workspace configurations
         paths.push((
@@ -847,6 +853,11 @@ impl MCPConfigManager {
 
                 // Cursor project root configurations
                 paths.push((dir.join(".cursor").join("mcp.json"), MCPClient::Cursor));
+                // Cursor repo-embedded MCP configuration in project root
+                paths.push((
+                    dir.join(".cursor").join("rules").join("mcp.json"),
+                    MCPClient::Cursor,
+                ));
 
                 // Claude Code project root configurations
                 paths.push((
