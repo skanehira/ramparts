@@ -1353,6 +1353,59 @@ fn print_multi_server_tree(results: &[ScanResult], _detailed: bool) {
                 result.url
             );
 
+            // Always show server-level YARA findings (even if scan failed)
+            let server_yara_results: Vec<&crate::types::YaraScanResult> = result
+                .yara_results
+                .iter()
+                .filter(|y| y.target_type == "server")
+                .collect();
+
+            if !server_yara_results.is_empty() {
+                println!("{ide_continuation}{continuation}🔒 Server Security:");
+                for (idx, yara_result) in server_yara_results.iter().enumerate() {
+                    let is_last_server_issue = idx == server_yara_results.len() - 1;
+                    let branch = if is_last_server_issue {
+                        "└─"
+                    } else {
+                        "├─"
+                    };
+
+                    let severity = yara_result
+                        .rule_metadata
+                        .as_ref()
+                        .and_then(|m| m.severity.as_ref())
+                        .map(|s| s.as_str())
+                        .unwrap_or("MEDIUM");
+                    let severity_color = match severity {
+                        "CRITICAL" => "🔴 CRITICAL".red(),
+                        "HIGH" => "🟠 HIGH".yellow(),
+                        "MEDIUM" => "🟡 MEDIUM".blue(),
+                        _ => "🟢 LOW".green(),
+                    };
+
+                    if !yara_result.context.is_empty() {
+                        println!(
+                            "{}{}    {} {} (YARA) {} – {}",
+                            ide_continuation,
+                            continuation,
+                            branch,
+                            severity_color,
+                            yara_result.rule_name,
+                            yara_result.context
+                        );
+                    } else {
+                        println!(
+                            "{}{}    {} {} (YARA) {}",
+                            ide_continuation,
+                            continuation,
+                            branch,
+                            severity_color,
+                            yara_result.rule_name
+                        );
+                    }
+                }
+            }
+
             // Show basic stats and detailed results for successful scans
             if matches!(result.status, crate::types::ScanStatus::Success) {
                 println!(
