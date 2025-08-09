@@ -2,10 +2,11 @@ use crate::config::{self, MCPConfig, MCPConfigManager, MCPServerConfig, ScannerC
 use crate::constants::{messages, protocol};
 use crate::mcp_client::McpClient;
 use crate::security::{
-    cross_origin_scanner::CrossOriginScanner, SecurityScanResult, SecurityScanner,
+    cross_origin_scanner::CrossOriginScanner, BatchScannableItem, SecurityScanResult,
+    SecurityScanner,
 };
 use crate::types::{
-    MCPPrompt, MCPResource, MCPServerInfo, MCPTool, ScanOptions, ScanResult, ScanStatus,
+    LlmPrompt, MCPPrompt, MCPResource, MCPServerInfo, MCPTool, ScanOptions, ScanResult, ScanStatus,
     YaraScanResult,
 };
 use crate::utils::{error_utils, performance::track_performance, Timer};
@@ -1014,64 +1015,157 @@ impl MCPScanner {
                     }
                 };
 
-                // Perform security scanning with configuration
-                let security_scanner = if scanner_config.security.enabled {
-                    SecurityScanner::with_config(scanner_config)
+                // If caller wants prompts back instead of LLM call, skip LLM and populate prompts
+                if options.return_prompts {
+                    let mut prompts: Vec<LlmPrompt> = Vec::new();
+                    // Tools
+                    if !scan_data.tools.is_empty() {
+                        let batch_size = scanner_config.scanner.llm_batch_size as usize;
+                        for (batch_index, chunk) in scan_data.tools.chunks(batch_size).enumerate() {
+                            let tools_info = chunk
+                                .iter()
+                                .enumerate()
+                                .map(|(i, tool)| tool.format_for_analysis(i))
+                                .collect::<String>();
+                            let prompt_text =
+                                SecurityScanner::create_tools_analysis_prompt(&tools_info);
+                            let item_names = chunk.iter().map(|t| t.name.clone()).collect();
+                            let request_body = SecurityScanner::with_config(scanner_config.clone())
+                                .build_llm_request_body(&prompt_text);
+                            let endpoint =
+                                SecurityScanner::with_config(scanner_config.clone()).get_endpoint();
+                            prompts.push(LlmPrompt {
+                                target_type: "tool".to_string(),
+                                batch_index,
+                                prompt: prompt_text,
+                                request_body: Some(request_body),
+                                endpoint,
+                                item_names,
+                            });
+                        }
+                    }
+                    // Prompts
+                    if !scan_data.prompts.is_empty() {
+                        let batch_size = scanner_config.scanner.llm_batch_size as usize;
+                        for (batch_index, chunk) in scan_data.prompts.chunks(batch_size).enumerate()
+                        {
+                            let prompts_info = chunk
+                                .iter()
+                                .enumerate()
+                                .map(|(i, p)| p.format_for_analysis(i))
+                                .collect::<String>();
+                            let prompt_text =
+                                SecurityScanner::create_prompts_analysis_prompt(&prompts_info);
+                            let item_names = chunk.iter().map(|p| p.name.clone()).collect();
+                            let request_body = SecurityScanner::with_config(scanner_config.clone())
+                                .build_llm_request_body(&prompt_text);
+                            let endpoint =
+                                SecurityScanner::with_config(scanner_config.clone()).get_endpoint();
+                            prompts.push(LlmPrompt {
+                                target_type: "prompt".to_string(),
+                                batch_index,
+                                prompt: prompt_text,
+                                request_body: Some(request_body),
+                                endpoint,
+                                item_names,
+                            });
+                        }
+                    }
+                    // Resources
+                    if !scan_data.resources.is_empty() {
+                        let batch_size = scanner_config.scanner.llm_batch_size as usize;
+                        for (batch_index, chunk) in
+                            scan_data.resources.chunks(batch_size).enumerate()
+                        {
+                            let resources_info = chunk
+                                .iter()
+                                .enumerate()
+                                .map(|(i, r)| r.format_for_analysis(i))
+                                .collect::<String>();
+                            let prompt_text =
+                                SecurityScanner::create_resources_analysis_prompt(&resources_info);
+                            let item_names = chunk.iter().map(|r| r.name.clone()).collect();
+                            let request_body = SecurityScanner::with_config(scanner_config.clone())
+                                .build_llm_request_body(&prompt_text);
+                            let endpoint =
+                                SecurityScanner::with_config(scanner_config.clone()).get_endpoint();
+                            prompts.push(LlmPrompt {
+                                target_type: "resource".to_string(),
+                                batch_index,
+                                prompt: prompt_text,
+                                request_body: Some(request_body),
+                                endpoint,
+                                item_names,
+                            });
+                        }
+                    }
+                    result.llm_prompts = Some(prompts);
                 } else {
-                    SecurityScanner::default()
-                };
-                let mut security_result = SecurityScanResult::new();
+                    // Perform security scanning with configuration
+                    let security_scanner = if scanner_config.security.enabled {
+                        SecurityScanner::with_config(scanner_config)
+                    } else {
+                        SecurityScanner::default()
+                    };
+                    let mut security_result = SecurityScanResult::new();
 
-                // Always perform the security scan (no enhanced/standard distinction)
-                // Batch scan tools for security issues
-                match security_scanner
-                    .scan_tools_batch(&scan_data.tools, options.detailed)
-                    .await
-                {
-                    Ok((tool_issues, analysis_details)) => {
-                        security_result.add_tool_issues(tool_issues);
-                        // Store the analysis details for each tool
-                        for (tool_name, details) in analysis_details {
-                            security_result.add_tool_analysis_details(tool_name, details);
-                        }
-                    }
-                    Err(e) => warn!("Failed to batch scan tools for security issues: {}", e),
-                }
-
-                // Batch scan prompts for security issues
-                if !scan_data.prompts.is_empty() {
+                    // Always perform the security scan (no enhanced/standard distinction)
+                    // Batch scan tools for security issues
                     match security_scanner
-                        .scan_prompts_batch(&scan_data.prompts, options.detailed)
+                        .scan_tools_batch(&scan_data.tools, options.detailed)
                         .await
                     {
-                        Ok(prompt_issues) => security_result.add_prompt_issues(prompt_issues),
-                        Err(e) => warn!("Failed to batch scan prompts for security issues: {}", e),
+                        Ok((tool_issues, analysis_details)) => {
+                            security_result.add_tool_issues(tool_issues);
+                            // Store the analysis details for each tool
+                            for (tool_name, details) in analysis_details {
+                                security_result.add_tool_analysis_details(tool_name, details);
+                            }
+                        }
+                        Err(e) => warn!("Failed to batch scan tools for security issues: {}", e),
                     }
-                }
 
-                // Batch scan resources for security issues
-                if !scan_data.resources.is_empty() {
-                    match security_scanner
-                        .scan_resources_batch(&scan_data.resources, options.detailed)
-                        .await
-                    {
-                        Ok(resource_issues) => security_result.add_resource_issues(resource_issues),
-                        Err(e) => {
-                            warn!("Failed to batch scan resources for security issues: {}", e);
+                    // Batch scan prompts for security issues
+                    if !scan_data.prompts.is_empty() {
+                        match security_scanner
+                            .scan_prompts_batch(&scan_data.prompts, options.detailed)
+                            .await
+                        {
+                            Ok(prompt_issues) => security_result.add_prompt_issues(prompt_issues),
+                            Err(e) => {
+                                warn!("Failed to batch scan prompts for security issues: {}", e)
+                            }
                         }
                     }
+
+                    // Batch scan resources for security issues
+                    if !scan_data.resources.is_empty() {
+                        match security_scanner
+                            .scan_resources_batch(&scan_data.resources, options.detailed)
+                            .await
+                        {
+                            Ok(resource_issues) => {
+                                security_result.add_resource_issues(resource_issues)
+                            }
+                            Err(e) => {
+                                warn!("Failed to batch scan resources for security issues: {}", e);
+                            }
+                        }
+                    }
+
+                    if !options.return_prompts {
+                        result.security_issues = Some(security_result);
+                    }
+
+                    // === POST-SCAN HOOKS ===
+                    self.middleware_chain.run_post_scan(&mut scan_data);
+
+                    // Update result with any post-scan changes
+                    result.yara_results.clone_from(&scan_data.yara_results);
+
+                    result.response_time_ms = Timer::start().elapsed_ms(); // Track actual scan time
+                    debug!("Scan completed in {}ms", result.response_time_ms);
                 }
-
-                result.security_issues = Some(security_result);
-
-                // === POST-SCAN HOOKS ===
-                self.middleware_chain.run_post_scan(&mut scan_data);
-
-                // Update result with any post-scan changes
-                result.yara_results.clone_from(&scan_data.yara_results);
-
-                result.response_time_ms = Timer::start().elapsed_ms(); // Track actual scan time
-                debug!("Scan completed in {}ms", result.response_time_ms);
             }
             Err(e) => {
                 result.status = ScanStatus::Failed(e.to_string());
