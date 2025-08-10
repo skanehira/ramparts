@@ -14,11 +14,11 @@
 - **Multi-transport MCP client**: HTTP/HTTPS, SSE, stdio/subprocess using rmcp SDK
 - **Security scanning**: YARA-X rules engine + cross-origin vulnerability detection
 - **Three operation modes**: CLI scanner, HTTP server (Axum), MCP server (stdio/SSE/HTTP)
-- **Main modules**: `scanner.rs` (core), `mcp_client.rs` (transport), `server.rs` (HTTP API), `config.rs` (IDE configs)
+- **Main modules**: `scanner.rs` (core), `mcp_client.rs` (transport), `server.rs` (HTTP API), `config.rs` (IDE & scanner configuration)
 
 ## CLI Subcommands
 - `scan <URL>`: Scan a single MCP server
-- `scan-config`: Scan from IDE configs (Cursor/Windsurf)
+- `scan-config`: Scan from IDE configs (e.g., VSCode, Cursor, Claude)
 - `init-config [--force]`: Create default `config.yaml`
 - `server [--port 3000] [--host 0.0.0.0]`: Start HTTP API
 - `mcp-stdio`: Run as MCP server over stdio
