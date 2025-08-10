@@ -490,7 +490,7 @@ mod tests {
                 "Should be HIGH severity"
             );
         } else {
-            panic!("Should have metadata");
+            assert!(false, "CrossDomainContamination result should have metadata");
         }
 
         // Find outlier results
@@ -615,7 +615,7 @@ mod tests {
                 "Should be MEDIUM severity"
             );
         } else {
-            panic!("Should have metadata");
+            assert!(false, "MixedSecuritySchemes result should have metadata");
         }
     }
 
