@@ -14,6 +14,8 @@ pub struct ScanRequest {
     pub detailed: Option<bool>,
     pub format: Option<String>,
     pub auth_headers: Option<HashMap<String, String>>,
+    /// If true, do not call the LLM; return prompts instead
+    pub return_prompts: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +117,10 @@ impl MCPScannerCore {
             }
 
             builder = builder.auth_headers(Some(headers));
+        }
+
+        if let Some(rp) = request.return_prompts {
+            builder = builder.return_prompts(rp);
         }
 
         builder.build()
@@ -223,6 +229,7 @@ mod tests {
                 "Authorization".to_string(),
                 "Bearer token".to_string(),
             )])),
+            return_prompts: Some(false),
         };
 
         assert_eq!(request.url, "http://example.com");
@@ -287,6 +294,7 @@ mod tests {
             detailed: Some(false),
             format: Some("text".to_string()),
             auth_headers: None,
+            return_prompts: Some(false),
         };
 
         let request = BatchScanRequest {
@@ -414,6 +422,7 @@ mod tests {
                 "Authorization".to_string(),
                 "Bearer token".to_string(),
             )])),
+            return_prompts: Some(false),
         };
 
         let options = core.parse_scan_options(&request); // No conversion for test
@@ -434,6 +443,7 @@ mod tests {
             detailed: None,
             format: None,
             auth_headers: None,
+            return_prompts: None,
         };
 
         let options = core.parse_scan_options(&request); // No conversion for test
