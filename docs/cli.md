@@ -237,12 +237,16 @@ ramparts scan <url>
 ramparts scan <url> --output table
 ```
 
+
+
 ### JSON Format
 Machine-readable JSON output:
 ```bash
 ramparts scan <url> --output json
 ramparts scan <url> --output json --pretty
 ```
+
+
 
 ### Text Format
 Simple text format:
@@ -251,7 +255,7 @@ ramparts scan <url> --output text
 ```
 
 ### Raw Format
-Raw JSON format preserving original MCP server responses:
+Raw JSON format preserving original MCP server responses with embedded security data:
 ```bash
 ramparts scan <url> --output raw
 ```
@@ -417,8 +421,9 @@ ramparts scan --batch servers.txt
 
 **Table Format (Default)**
 - Human-readable with colored output
-- Tree-style security issue display
+- Tree-style security issue display with inline details
 - Progress indicators and summaries
+- Color-coded severity levels (🔴 CRITICAL, 🟠 HIGH, 🟡 MEDIUM, 🟢 LOW)
 
 **JSON Format**
 - Machine-readable structured output

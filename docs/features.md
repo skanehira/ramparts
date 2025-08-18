@@ -32,6 +32,27 @@ ramparts scan https://your-mcp-server.com --config custom-rules.yaml
 
 Under the hood, Ramparts uses YARA-X rules to catch security patterns that static analysis might miss. We ship with rules for common vulnerabilities, MCP-specific attack vectors, and secret detection (AWS keys, GitHub tokens, etc.).
 
+**Rich Security Context**: Each YARA rule includes comprehensive metadata to help you understand and prioritize security findings:
+
+- **Severity Levels**: CRITICAL, HIGH, MEDIUM, LOW based on the security impact
+- **Rule Details**: Name, author, version, and detailed descriptions
+- **Categorization**: Tags like `secrets`, `path-traversal`, `command-injection` for filtering
+- **Context Messages**: Human-readable explanations of what was detected
+
+```json
+{
+  "rule_metadata": {
+    "name": "Environment Variable Leakage",
+    "author": "Ramparts Security Team",
+    "version": "1.0", 
+    "description": "Detects exposure of sensitive environment variables and API keys",
+    "severity": "HIGH",
+    "category": "environment,secrets,api-keys,credentials"
+  },
+  "status": "warning"
+}
+```
+
 But here's where it gets interesting for your specific environment—you can write custom rules for your organization's unique security requirements. Maybe you have internal APIs that should never be exposed, or specific secret formats that need detection. Just drop your `.yar` files in the `rules/` directory and Ramparts will pick them up automatically.
 
 The best part? Rules hot-reload, so you can iterate on your security policies without restarting anything. It's all pure Rust under the hood, so there are no system dependencies to manage.
@@ -54,11 +75,35 @@ The server handles concurrent requests, so your team can run multiple scans simu
 
 📚 **[Complete API Documentation](api.md)** covers all the endpoints with examples and integration patterns.
 
-### Multiple Transport Support
+### Advanced Transport Support with Intelligent Fallback
 
-Ramparts talks to MCP servers however they're set up. Most of the time that's HTTP/HTTPS for remote servers, but it also handles STDIO communication for local executables. You don't need to think about it much—Ramparts figures out the right transport based on your URL.
+Ramparts supports multiple MCP transport methods with intelligent fallback strategies to ensure maximum compatibility:
 
-So whether you're scanning `https://api.githubcopilot.com/mcp/` or `stdio:///usr/local/bin/mcp-server`, it just works.
+**Transport Methods:**
+- **Simple HTTP**: Custom implementation optimized for most MCP servers
+- **rmcp Streamable HTTP**: Standards-compliant streaming HTTP transport
+- **rmcp SSE**: Server-Sent Events for real-time communication
+- **STDIO/Subprocess**: Local executable communication
+
+**Smart Connection Strategy:**
+Ramparts automatically tries multiple transport methods and selects the most reliable one. For HTTP servers, it tests simple HTTP first, then falls back to rmcp streamable HTTP and SSE if needed. Each transport is validated with actual API calls to ensure full functionality before being selected.
+
+**Session Management:**
+For stateful MCP servers (like GitHub Copilot), Ramparts automatically handles session management:
+- Extracts `mcp-session-id` from server responses
+- Maintains session state across multiple API calls
+- Ensures authentication headers are properly propagated
+- Validates session functionality before proceeding
+
+**Examples:**
+```bash
+# HTTP servers with automatic transport selection
+ramparts scan https://api.githubcopilot.com/mcp/ --auth-headers "Authorization: Bearer $TOKEN"
+
+# STDIO servers with multiple format support
+ramparts scan "stdio:npx:mcp-server-commands"
+ramparts scan "stdio:///usr/local/bin/python3:/path/to/server.py"
+```
 
 **STDIO servers get the same comprehensive security scanning as HTTP servers** - including YARA rule analysis, vulnerability detection, and detailed reporting. The `scan-config` command automatically detects and clearly labels STDIO vs HTTP servers from your IDE configurations.
 
@@ -66,11 +111,15 @@ So whether you're scanning `https://api.githubcopilot.com/mcp/` or `stdio:///usr
 
 ### Flexible Output Formats
 
-The default table format gives you a nice tree view of security issues with color coding for severity levels. When you need to integrate with other tools, JSON format provides structured data that's easy to parse and filter.
+The default table format gives you a nice tree view of security issues with color coding for severity levels and inline details formatting for better readability.
+
+When you need to integrate with other tools, JSON format provides structured data that's easy to parse and filter.
 
 For debugging MCP protocol issues, raw format shows you exactly what the server responded with, which is invaluable when you're trying to figure out why something isn't working as expected.
 
 The JSON structure is designed to be jq-friendly, so you can easily extract issue counts, filter by severity, or pull out specific findings for reporting.
+
+
 
 ### IDE Integration
 
@@ -113,6 +162,8 @@ scanner:
   max_retries: 3             # Retry failed requests
   http_timeout: 30           # HTTP request timeout
 ```
+
+
 
 For environments with strict rate limits, you can dial down the concurrency and add delays between requests. For fast internal networks, you can crank up the parallelism for faster scanning.
 

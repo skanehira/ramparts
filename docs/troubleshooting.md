@@ -115,6 +115,8 @@ curl -H "Authorization: Bearer $TOKEN" <url>
 ramparts scan <url> --verbose
 ```
 
+
+
 ### STDIO Connection Problems
 
 **Issue: STDIO server not starting**
@@ -134,9 +136,44 @@ ls -la /usr/local/bin/mcp-server
 node --version
 python3 --version
 
-# Use full path
-ramparts scan "stdio:///usr/local/bin/node /path/to/server.js"
+# Use correct STDIO format (colon-separated)
+ramparts scan "stdio:npx:mcp-server-commands"
+ramparts scan "stdio:python3:/path/to/server.py"
+ramparts scan "stdio:node:/path/to/server.js"
+
+# Use full path if needed
+ramparts scan "stdio:///usr/local/bin/python3:/path/to/server.py"
 ```
+
+**Issue: STDIO URL format errors**
+```bash
+error: Invalid STDIO URL format
+```
+
+**Solutions:**
+```bash
+# Correct format: stdio:command:args (colon-separated)
+ramparts scan "stdio:npx:mcp-server-commands"
+
+# NOT: stdio://npx mcp-server-commands (space-separated)
+# NOT: stdio://npx%20mcp-server-commands (URL-encoded)
+
+# Multiple arguments example
+ramparts scan "stdio:python3:/path/to/server.py:--port:8080"
+```
+
+### MCP stdio server exits immediately
+**Issue:**
+```bash
+Error: ConnectionClosed("initialized request")
+```
+
+**Cause:**
+- The MCP stdio server expects an MCP client to speak JSON-RPC over stdin/stdout. When run directly in a terminal, no `initialize` request is sent.
+
+**Fix:**
+- Run `ramparts mcp-stdio` under an MCP host (e.g., Docker MCP Toolkit, Cursor, Claude Desktop).
+- For local testing, use an MCP inspector or a small client that spawns the binary and sends `initialize`.
 
 **Issue: Environment variable issues**
 ```bash
@@ -152,8 +189,64 @@ export DATABASE_URL="your-db-url"
 # Check server requirements
 head -20 /path/to/mcp-server.js  # Look for required env vars
 
-# Use with env command
-ramparts scan "stdio://env API_KEY=$API_KEY node server.js"
+# Use with env command (if supported by your shell)
+env API_KEY=$API_KEY ramparts scan "stdio:node:server.js"
+```
+
+### Transport Fallback Issues
+
+**Issue: Simple HTTP fails, need to force rmcp transport**
+```bash
+error: Simple HTTP connection failed, trying fallback transports
+```
+
+**Solutions:**
+```bash
+# Enable debug logging to see transport selection
+ramparts --debug scan https://api.example.com/mcp/
+
+# The system automatically tries:
+# 1. Simple HTTP (custom implementation)
+# 2. rmcp Streamable HTTP (standards-compliant)
+# 3. rmcp SSE (Server-Sent Events)
+
+# If all HTTP transports fail, check:
+curl -v https://api.example.com/mcp/
+```
+
+**Issue: Session management problems**
+```bash
+error: Invalid session ID
+```
+
+**Solutions:**
+```bash
+# For stateful servers (like GitHub Copilot), ramparts automatically:
+# 1. Extracts mcp-session-id from initialize response
+# 2. Includes session ID in subsequent requests
+# 3. Validates session with actual API calls
+
+# If session issues persist:
+ramparts --debug scan <url> --auth-headers "Authorization: Bearer $TOKEN"
+
+# Check server logs for session requirements
+```
+
+**Issue: Transport detection problems**
+```bash
+error: No suitable transport found
+```
+
+**Solutions:**
+```bash
+# For HTTP URLs: ramparts tries multiple HTTP transports automatically
+ramparts scan https://api.example.com/mcp/
+
+# For STDIO: use proper format
+ramparts scan "stdio:npx:mcp-server-commands"
+
+# Debug transport selection
+RUST_LOG=debug ramparts scan <url>
 ```
 
 ## Authentication Issues

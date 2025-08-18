@@ -2,10 +2,11 @@ use crate::config::{self, MCPConfig, MCPConfigManager, MCPServerConfig, ScannerC
 use crate::constants::{messages, protocol};
 use crate::mcp_client::McpClient;
 use crate::security::{
-    cross_origin_scanner::CrossOriginScanner, SecurityScanResult, SecurityScanner,
+    cross_origin_scanner::CrossOriginScanner, BatchScannableItem, SecurityScanResult,
+    SecurityScanner,
 };
 use crate::types::{
-    MCPPrompt, MCPResource, MCPServerInfo, MCPTool, ScanOptions, ScanResult, ScanStatus,
+    LlmPrompt, MCPPrompt, MCPResource, MCPServerInfo, MCPTool, ScanOptions, ScanResult, ScanStatus,
     YaraScanResult,
 };
 use crate::utils::{error_utils, performance::track_performance, Timer};
@@ -64,6 +65,9 @@ fn generate_context_message(item_type: &str, rule_name: &str) -> String {
             format!("Domain outlier detected - {item_type} uses different domain than majority")
         }
         "MixedSecuritySchemes" => format!("Mixed HTTP/HTTPS schemes detected in {item_type}"),
+
+        // Command injection rules
+        "CommandInjection" => format!("Command injection vulnerability detected in {item_type}"),
 
         // Default fallback
         _ => format!("{item_type} matched by security rule {rule_name}"),
@@ -206,12 +210,14 @@ use std::sync::Arc;
 #[cfg(feature = "yara-x-scanning")]
 pub struct YaraMatchInfo {
     pub rule_name: String,
+    pub metadata: Option<crate::types::YaraRuleMetadata>,
 }
 
 /// Enhanced YARA match with rule metadata (non-YARA fallback)
 #[cfg(not(feature = "yara-x-scanning"))]
 pub struct YaraMatchInfo {
     pub rule_name: String,
+    pub metadata: Option<crate::types::YaraRuleMetadata>,
 }
 
 /// Threat detection rules engine that loads YARA-X rules from directory structure
@@ -395,6 +401,63 @@ impl ThreatRules {
         Ok(rules)
     }
 
+    /// Extract metadata from a YARA-X rule match
+    #[cfg(feature = "yara-x-scanning")]
+    fn extract_rule_metadata(rule_match: &yara_x::Rule) -> Option<crate::types::YaraRuleMetadata> {
+        let metadata_iter = rule_match.metadata();
+        let metadata_vec: Vec<(&str, yara_x::MetaValue)> = metadata_iter.collect();
+
+        if metadata_vec.is_empty() {
+            return None;
+        }
+
+        let mut rule_metadata = crate::types::YaraRuleMetadata {
+            name: None,
+            author: None,
+            date: None,
+            version: None,
+            description: None,
+            severity: None,
+            category: None,
+            confidence: None,
+            tags: Vec::new(),
+        };
+
+        // Helper function to convert MetaValue to String
+        let meta_value_to_string = |value: &yara_x::MetaValue| -> String {
+            match value {
+                yara_x::MetaValue::Integer(i) => i.to_string(),
+                yara_x::MetaValue::Float(f) => f.to_string(),
+                yara_x::MetaValue::Bool(b) => b.to_string(),
+                yara_x::MetaValue::String(s) => (*s).to_string(),
+                yara_x::MetaValue::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            }
+        };
+
+        // Extract metadata fields
+        for (key, value) in &metadata_vec {
+            match *key {
+                "name" => rule_metadata.name = Some(meta_value_to_string(value)),
+                "author" => rule_metadata.author = Some(meta_value_to_string(value)),
+                "date" => rule_metadata.date = Some(meta_value_to_string(value)),
+                "version" => rule_metadata.version = Some(meta_value_to_string(value)),
+                "description" => rule_metadata.description = Some(meta_value_to_string(value)),
+                "severity" => rule_metadata.severity = Some(meta_value_to_string(value)),
+                "category" => rule_metadata.category = Some(meta_value_to_string(value)),
+                "confidence" => rule_metadata.confidence = Some(meta_value_to_string(value)),
+                "tags" => {
+                    // Handle tags as comma-separated string or array
+                    let tags_str = meta_value_to_string(value);
+                    rule_metadata.tags =
+                        tags_str.split(',').map(|s| s.trim().to_string()).collect();
+                }
+                _ => {} // Ignore unknown metadata fields
+            }
+        }
+
+        Some(rule_metadata)
+    }
+
     /// Consolidated method to scan text with rules and return enhanced match information
     #[cfg(feature = "yara-x-scanning")]
     fn scan_with_rules_enhanced_internal(
@@ -412,6 +475,7 @@ impl ThreatRules {
                     for m in scan_results.matching_rules() {
                         all_matches.push(YaraMatchInfo {
                             rule_name: m.identifier().to_string(),
+                            metadata: Self::extract_rule_metadata(&m),
                         });
                     }
                 }
@@ -573,7 +637,7 @@ impl YaraScanner {
                 // Store YARA results for each match with metadata
                 for match_info in enhanced_matches {
                     let yara_result =
-                        Self::create_yara_result_with_metadata::<T>(item, &match_info.rule_name);
+                        Self::create_yara_result_with_metadata::<T>(item, &match_info);
                     results.push(yara_result);
                 }
             }
@@ -592,18 +656,18 @@ impl YaraScanner {
     }
 
     /// Create a YARA scan result with original rule metadata
-    fn create_yara_result_with_metadata<T>(item: &T, rule_name: &str) -> YaraScanResult
+    fn create_yara_result_with_metadata<T>(item: &T, match_info: &YaraMatchInfo) -> YaraScanResult
     where
         T: crate::security::BatchScannableItem,
     {
         YaraScanResult {
             target_type: T::item_type().to_string(),
             target_name: item.name().to_string(),
-            rule_name: rule_name.to_string(),
-            rule_file: rule_name_to_file_name(rule_name),
+            rule_name: match_info.rule_name.clone(),
+            rule_file: rule_name_to_file_name(&match_info.rule_name),
             matched_text: None,
-            context: generate_context_message(T::item_type(), rule_name),
-            rule_metadata: None,
+            context: generate_context_message(T::item_type(), &match_info.rule_name),
+            rule_metadata: match_info.metadata.clone(),
             phase: None,
             rules_executed: None,
             security_issues_detected: None,
@@ -868,8 +932,11 @@ impl MCPScanner {
         // Set up middleware chain with dynamic YARA capabilities
         let mut middleware_chain = ScannerChain::new();
 
+        // Fixed rules directory
+        let rules_dir = "rules".to_string();
+
         // Add dynamic YARA pre-scan capability
-        if let Ok(pre_cap) = YaraScanner::new("rules", ScanPhase::PreScan) {
+        if let Ok(pre_cap) = YaraScanner::new(&rules_dir, ScanPhase::PreScan) {
             middleware_chain.add(Box::new(pre_cap));
             debug!("{}", messages::YARA_PRE_SCAN_LOADED);
         } else {
@@ -877,7 +944,7 @@ impl MCPScanner {
         }
 
         // Add dynamic YARA post-scan capability
-        if let Ok(post_cap) = YaraScanner::new("rules", ScanPhase::PostScan) {
+        if let Ok(post_cap) = YaraScanner::new(&rules_dir, ScanPhase::PostScan) {
             middleware_chain.add(Box::new(post_cap));
             debug!("{}", messages::YARA_POST_SCAN_LOADED);
         } else {
@@ -948,64 +1015,157 @@ impl MCPScanner {
                     }
                 };
 
-                // Perform security scanning with configuration
-                let security_scanner = if scanner_config.security.enabled {
-                    SecurityScanner::with_config(scanner_config)
+                // If caller wants prompts back instead of LLM call, skip LLM and populate prompts
+                if options.return_prompts {
+                    let mut prompts: Vec<LlmPrompt> = Vec::new();
+                    // Tools
+                    if !scan_data.tools.is_empty() {
+                        let batch_size = scanner_config.scanner.llm_batch_size as usize;
+                        for (batch_index, chunk) in scan_data.tools.chunks(batch_size).enumerate() {
+                            let tools_info = chunk
+                                .iter()
+                                .enumerate()
+                                .map(|(i, tool)| tool.format_for_analysis(i))
+                                .collect::<String>();
+                            let prompt_text =
+                                SecurityScanner::create_tools_analysis_prompt(&tools_info);
+                            let item_names = chunk.iter().map(|t| t.name.clone()).collect();
+                            let request_body = SecurityScanner::with_config(scanner_config.clone())
+                                .build_llm_request_body(&prompt_text);
+                            let endpoint =
+                                SecurityScanner::with_config(scanner_config.clone()).get_endpoint();
+                            prompts.push(LlmPrompt {
+                                target_type: "tool".to_string(),
+                                batch_index,
+                                prompt: prompt_text,
+                                request_body: Some(request_body),
+                                endpoint,
+                                item_names,
+                            });
+                        }
+                    }
+                    // Prompts
+                    if !scan_data.prompts.is_empty() {
+                        let batch_size = scanner_config.scanner.llm_batch_size as usize;
+                        for (batch_index, chunk) in scan_data.prompts.chunks(batch_size).enumerate()
+                        {
+                            let prompts_info = chunk
+                                .iter()
+                                .enumerate()
+                                .map(|(i, p)| p.format_for_analysis(i))
+                                .collect::<String>();
+                            let prompt_text =
+                                SecurityScanner::create_prompts_analysis_prompt(&prompts_info);
+                            let item_names = chunk.iter().map(|p| p.name.clone()).collect();
+                            let request_body = SecurityScanner::with_config(scanner_config.clone())
+                                .build_llm_request_body(&prompt_text);
+                            let endpoint =
+                                SecurityScanner::with_config(scanner_config.clone()).get_endpoint();
+                            prompts.push(LlmPrompt {
+                                target_type: "prompt".to_string(),
+                                batch_index,
+                                prompt: prompt_text,
+                                request_body: Some(request_body),
+                                endpoint,
+                                item_names,
+                            });
+                        }
+                    }
+                    // Resources
+                    if !scan_data.resources.is_empty() {
+                        let batch_size = scanner_config.scanner.llm_batch_size as usize;
+                        for (batch_index, chunk) in
+                            scan_data.resources.chunks(batch_size).enumerate()
+                        {
+                            let resources_info = chunk
+                                .iter()
+                                .enumerate()
+                                .map(|(i, r)| r.format_for_analysis(i))
+                                .collect::<String>();
+                            let prompt_text =
+                                SecurityScanner::create_resources_analysis_prompt(&resources_info);
+                            let item_names = chunk.iter().map(|r| r.name.clone()).collect();
+                            let request_body = SecurityScanner::with_config(scanner_config.clone())
+                                .build_llm_request_body(&prompt_text);
+                            let endpoint =
+                                SecurityScanner::with_config(scanner_config.clone()).get_endpoint();
+                            prompts.push(LlmPrompt {
+                                target_type: "resource".to_string(),
+                                batch_index,
+                                prompt: prompt_text,
+                                request_body: Some(request_body),
+                                endpoint,
+                                item_names,
+                            });
+                        }
+                    }
+                    result.llm_prompts = Some(prompts);
                 } else {
-                    SecurityScanner::default()
-                };
-                let mut security_result = SecurityScanResult::new();
+                    // Perform security scanning with configuration
+                    let security_scanner = if scanner_config.security.enabled {
+                        SecurityScanner::with_config(scanner_config)
+                    } else {
+                        SecurityScanner::default()
+                    };
+                    let mut security_result = SecurityScanResult::new();
 
-                // Always perform the security scan (no enhanced/standard distinction)
-                // Batch scan tools for security issues
-                match security_scanner
-                    .scan_tools_batch(&scan_data.tools, options.detailed)
-                    .await
-                {
-                    Ok((tool_issues, analysis_details)) => {
-                        security_result.add_tool_issues(tool_issues);
-                        // Store the analysis details for each tool
-                        for (tool_name, details) in analysis_details {
-                            security_result.add_tool_analysis_details(tool_name, details);
-                        }
-                    }
-                    Err(e) => warn!("Failed to batch scan tools for security issues: {}", e),
-                }
-
-                // Batch scan prompts for security issues
-                if !scan_data.prompts.is_empty() {
+                    // Always perform the security scan (no enhanced/standard distinction)
+                    // Batch scan tools for security issues
                     match security_scanner
-                        .scan_prompts_batch(&scan_data.prompts, options.detailed)
+                        .scan_tools_batch(&scan_data.tools, options.detailed)
                         .await
                     {
-                        Ok(prompt_issues) => security_result.add_prompt_issues(prompt_issues),
-                        Err(e) => warn!("Failed to batch scan prompts for security issues: {}", e),
+                        Ok((tool_issues, analysis_details)) => {
+                            security_result.add_tool_issues(tool_issues);
+                            // Store the analysis details for each tool
+                            for (tool_name, details) in analysis_details {
+                                security_result.add_tool_analysis_details(tool_name, details);
+                            }
+                        }
+                        Err(e) => warn!("Failed to batch scan tools for security issues: {}", e),
                     }
-                }
 
-                // Batch scan resources for security issues
-                if !scan_data.resources.is_empty() {
-                    match security_scanner
-                        .scan_resources_batch(&scan_data.resources, options.detailed)
-                        .await
-                    {
-                        Ok(resource_issues) => security_result.add_resource_issues(resource_issues),
-                        Err(e) => {
-                            warn!("Failed to batch scan resources for security issues: {}", e);
+                    // Batch scan prompts for security issues
+                    if !scan_data.prompts.is_empty() {
+                        match security_scanner
+                            .scan_prompts_batch(&scan_data.prompts, options.detailed)
+                            .await
+                        {
+                            Ok(prompt_issues) => security_result.add_prompt_issues(prompt_issues),
+                            Err(e) => {
+                                warn!("Failed to batch scan prompts for security issues: {}", e)
+                            }
                         }
                     }
+
+                    // Batch scan resources for security issues
+                    if !scan_data.resources.is_empty() {
+                        match security_scanner
+                            .scan_resources_batch(&scan_data.resources, options.detailed)
+                            .await
+                        {
+                            Ok(resource_issues) => {
+                                security_result.add_resource_issues(resource_issues)
+                            }
+                            Err(e) => {
+                                warn!("Failed to batch scan resources for security issues: {}", e);
+                            }
+                        }
+                    }
+
+                    if !options.return_prompts {
+                        result.security_issues = Some(security_result);
+                    }
+
+                    // === POST-SCAN HOOKS ===
+                    self.middleware_chain.run_post_scan(&mut scan_data);
+
+                    // Update result with any post-scan changes
+                    result.yara_results.clone_from(&scan_data.yara_results);
+
+                    result.response_time_ms = Timer::start().elapsed_ms(); // Track actual scan time
+                    debug!("Scan completed in {}ms", result.response_time_ms);
                 }
-
-                result.security_issues = Some(security_result);
-
-                // === POST-SCAN HOOKS ===
-                self.middleware_chain.run_post_scan(&mut scan_data);
-
-                // Update result with any post-scan changes
-                result.yara_results.clone_from(&scan_data.yara_results);
-
-                result.response_time_ms = Timer::start().elapsed_ms(); // Track actual scan time
-                debug!("Scan completed in {}ms", result.response_time_ms);
             }
             Err(e) => {
                 result.status = ScanStatus::Failed(e.to_string());
@@ -1198,6 +1358,207 @@ impl MCPScanner {
             config.servers.as_ref().map(|s| s.len()).unwrap_or(0)
         );
 
+        // =============================================================
+        // Pre-connection static analysis of MCP server definitions
+        // - Scan command/args/env with YARA pre-scan rules (if enabled)
+        // - Heuristic checks for risky STDIO patterns (always on)
+        // - Baseline/diff detection for post-approval swaps
+        // =============================================================
+        use std::collections::HashMap as StdHashMap;
+        let mut server_config_yara: StdHashMap<String, Vec<YaraScanResult>> = StdHashMap::new();
+
+        // Build initial baseline map from disk (best-effort)
+        fn get_baseline_path() -> std::path::PathBuf {
+            dirs::home_dir()
+                .map(|mut p| {
+                    p.push(".ramparts");
+                    p.push("mcp-baseline.json");
+                    p
+                })
+                .unwrap_or_else(|| std::path::PathBuf::from(".ramparts/mcp-baseline.json"))
+        }
+
+        fn compute_server_fingerprint(server: &MCPServerConfig) -> String {
+            use std::hash::{Hash, Hasher};
+            let mut s = String::new();
+            if let Some(name) = &server.name {
+                s.push_str(name);
+            }
+            if let Some(url) = &server.url {
+                s.push_str(url);
+            }
+            if let Some(cmd) = &server.command {
+                s.push_str(cmd);
+            }
+            if let Some(args) = &server.args {
+                s.push_str(&args.join(" "));
+            }
+            if let Some(env) = &server.env {
+                let mut kv: Vec<_> = env.iter().collect();
+                kv.sort_by(|a, b| a.0.cmp(b.0));
+                for (k, v) in kv {
+                    s.push_str(k);
+                    s.push('=');
+                    s.push_str(v);
+                }
+            }
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            s.hash(&mut hasher);
+            format!("{:016x}", hasher.finish())
+        }
+
+        let baseline_path = get_baseline_path();
+        let mut baseline_map: StdHashMap<String, String> = StdHashMap::new();
+        if baseline_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&baseline_path) {
+                if let Ok(map) = serde_json::from_str::<StdHashMap<String, String>>(&content) {
+                    baseline_map = map;
+                }
+            }
+        }
+
+        // Prepare YARA rules engine for config scanning (feature-gated)
+        #[cfg(feature = "yara-x-scanning")]
+        let pre_rules_engine = ThreatRules::new("rules").ok(); // compile once for config scan
+
+        if let Some(ref servers) = config.servers {
+            for server in servers {
+                let key = server.dedup_key();
+
+                // Heuristic removed in favor of YARA (below). Keep vector for potential YARA additions
+                let mut prefindings: Vec<YaraScanResult> = Vec::new();
+
+                // YARA pre-scan on server definition text (if YARA enabled)
+                #[cfg(feature = "yara-x-scanning")]
+                if let Some(engine) = &pre_rules_engine {
+                    let mut text = String::new();
+                    if let Some(name) = &server.name {
+                        text.push_str(&format!("NAME: {name}\n"));
+                    }
+                    if let Some(url) = &server.url {
+                        text.push_str(&format!("URL: {url}\n"));
+                    }
+                    if let Some(cmd) = &server.command {
+                        text.push_str(&format!("COMMAND: {cmd}\n"));
+                    }
+                    if let Some(args) = &server.args {
+                        text.push_str(&format!("ARGS: {}\n", args.join(" ")));
+                    }
+                    if let Some(env) = &server.env {
+                        // Only include environment VALUES that look non-placeholder and non-trivial,
+                        // to avoid false positives from variable NAMES alone
+                        let mut kv: Vec<_> = env.iter().collect();
+                        kv.sort_by(|a, b| a.0.cmp(b.0));
+                        for (_k, v) in kv {
+                            let val = v.trim();
+                            if val.is_empty() {
+                                continue;
+                            }
+                            // Skip common placeholder syntaxes and trivial booleans
+                            let is_placeholder = val.starts_with("${")
+                                || val.starts_with("$(")
+                                || val.contains("{{")
+                                || val.contains('<')
+                                || val.eq_ignore_ascii_case("true")
+                                || val.eq_ignore_ascii_case("false");
+                            if is_placeholder || val.len() < 8 {
+                                continue;
+                            }
+                            text.push_str(&format!("ENV_VALUE:{val} "));
+                        }
+                        text.push('\n');
+                    }
+                    if let Some(desc) = &server.description {
+                        text.push_str(&format!("DESCRIPTION: {desc}\n"));
+                    }
+                    let context = format!(
+                        "server '{}'",
+                        server.name.as_deref().unwrap_or(&server.to_display_url())
+                    );
+                    let matches = engine.pre_scan(&text, &context);
+                    for m in matches {
+                        prefindings.push(YaraScanResult {
+                            target_type: "server".to_string(),
+                            target_name: server
+                                .name
+                                .clone()
+                                .unwrap_or_else(|| server.to_display_url()),
+                            rule_name: m.rule_name.clone(),
+                            rule_file: rule_name_to_file_name(&m.rule_name),
+                            matched_text: None,
+                            context: generate_context_message("server", &m.rule_name),
+                            rule_metadata: m.metadata.clone(),
+                            phase: Some("pre-config".to_string()),
+                            rules_executed: None,
+                            security_issues_detected: None,
+                            total_items_scanned: None,
+                            total_matches: None,
+                            status: Some("warning".to_string()),
+                        });
+                    }
+                }
+
+                // Baseline/diff check (best-effort)
+                let fp = compute_server_fingerprint(server);
+                match baseline_map.get(&key) {
+                    Some(stored) if stored == &fp => { /* unchanged */ }
+                    Some(_different) => {
+                        prefindings.push(YaraScanResult {
+                            target_type: "server".to_string(),
+                            target_name: server
+                                .name
+                                .clone()
+                                .unwrap_or_else(|| server.to_display_url()),
+                            rule_name: "MCPConfigChanged".to_string(),
+                            rule_file: None,
+                            matched_text: None,
+                            context: "MCP server configuration changed since last baseline"
+                                .to_string(),
+                            rule_metadata: Some(crate::types::YaraRuleMetadata {
+                                name: Some("Baseline Change".to_string()),
+                                author: Some("Ramparts".to_string()),
+                                date: None,
+                                version: None,
+                                description: Some(
+                                    "Server command/args/env fingerprint differs from baseline."
+                                        .to_string(),
+                                ),
+                                severity: Some("HIGH".to_string()),
+                                category: Some("supply-chain".to_string()),
+                                confidence: Some("MEDIUM".to_string()),
+                                tags: vec!["baseline".to_string()],
+                            }),
+                            phase: Some("pre-config".to_string()),
+                            rules_executed: None,
+                            security_issues_detected: None,
+                            total_items_scanned: None,
+                            total_matches: None,
+                            status: Some("warning".to_string()),
+                        });
+                    }
+                    None => {
+                        // First-run: populate baseline directory/file if missing (best-effort)
+                        if !baseline_path.exists() {
+                            if let Some(parent) = baseline_path.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                        }
+                        baseline_map.insert(key.clone(), fp.clone());
+                        // Write baseline silently
+                        if let Ok(serialized) = serde_json::to_string_pretty(&baseline_map) {
+                            let _ = std::fs::write(&baseline_path, serialized);
+                        }
+                    }
+                }
+
+                if !prefindings.is_empty() {
+                    server_config_yara.insert(key, prefindings);
+                }
+            }
+        }
+
+        let server_config_yara = std::sync::Arc::new(server_config_yara);
+
         let mut results = Vec::new();
 
         if let Some(ref servers) = config.servers {
@@ -1206,61 +1567,138 @@ impl MCPScanner {
                 servers.len()
             );
 
-            for server in servers {
-                debug!(
-                    "Scanning MCP server: [\x1b[1m{}\x1b[0m] ({})",
-                    server.name.as_deref().unwrap_or("unnamed"),
-                    server.to_display_url()
-                );
+            // Parallel scanning implementation using futures
+            use futures::future::join_all;
 
-                // Extract IDE name from description if available
-                let ide_source = server
-                    .description
-                    .as_ref()
-                    .and_then(|desc| {
-                        // Look for [IDE:name] pattern in description
-                        if let Some(start) = desc.rfind("[IDE:") {
-                            if let Some(end) = desc[start..].find(']') {
-                                let ide_name = &desc[start + 5..start + end];
-                                return Some(ide_name.to_string());
+            // Create scanning tasks for parallel execution
+            let scan_tasks: Vec<_> = servers
+                .iter()
+                .map(|server| {
+                    let server = server.clone();
+                    let config = config.clone();
+                    let options = options.clone();
+                    // Clone the scanner (shares compiled YARA rules, creates new McpClient)
+                    let scanner = self.clone();
+                    // Clone shared pre-config findings map into the task
+                    let cfg_yara = server_config_yara.clone();
+
+                    tokio::spawn(async move {
+                        debug!(
+                            "Scanning MCP server: [\x1b[1m{}\x1b[0m] ({})",
+                            server.name.as_deref().unwrap_or("unnamed"),
+                            server.to_display_url()
+                        );
+
+                        // Extract IDE name from description if available
+                        let ide_source = server
+                            .description
+                            .as_ref()
+                            .and_then(|desc| {
+                                // Look for [IDE:name] pattern in description
+                                if let Some(start) = desc.rfind("[IDE:") {
+                                    if let Some(end) = desc[start..].find(']') {
+                                        let ide_name = &desc[start + 5..start + end];
+                                        return Some(ide_name.to_string());
+                                    }
+                                }
+                                None
+                            })
+                            .unwrap_or_else(|| "IDE Configs".to_string());
+
+                        let server_options =
+                            MCPScanner::build_server_options(&options, &config, &server);
+
+                        // Small helper to attach pre-config findings
+                        let attach_findings = |res: &mut ScanResult| {
+                            if let Some(findings) = cfg_yara.get(&server.dedup_key()) {
+                                res.yara_results.extend(findings.clone());
                             }
-                        }
-                        None
+                        };
+
+                        // Scan the MCP server - HTTP or STDIO
+                        let result = if let Some(url) = server.scan_url() {
+                            // HTTP server scanning
+                            match scanner.scan_single(url, server_options).await {
+                                Ok(mut result) => {
+                                    result.ide_source = Some(ide_source);
+                                    // Append pre-config YARA/heuristic/baseline findings if any
+                                    attach_findings(&mut result);
+                                    result
+                                }
+                                Err(e) => {
+                                    let mut failed_result = ScanResult::new(url.to_string());
+                                    failed_result.status = ScanStatus::Failed(e.to_string());
+                                    failed_result.ide_source = Some(ide_source);
+                                    attach_findings(&mut failed_result);
+                                    failed_result
+                                }
+                            }
+                        } else if server.command.is_some() {
+                            // STDIO server scanning
+                            match scanner.scan_stdio_server(&server, server_options).await {
+                                Ok(mut result) => {
+                                    result.ide_source = Some(ide_source);
+                                    attach_findings(&mut result);
+                                    result
+                                }
+                                Err(e) => {
+                                    let mut failed_result =
+                                        ScanResult::new(server.to_display_url());
+                                    failed_result.status = ScanStatus::Failed(e.to_string());
+                                    failed_result.ide_source = Some(ide_source);
+                                    attach_findings(&mut failed_result);
+                                    failed_result
+                                }
+                            }
+                        } else {
+                            // Invalid server configuration
+                            let mut failed_result = ScanResult::new("unknown".to_string());
+                            failed_result.status =
+                                ScanStatus::Failed("Invalid server configuration".to_string());
+                            failed_result.ide_source = Some(ide_source);
+                            attach_findings(&mut failed_result);
+                            failed_result
+                        };
+
+                        result
                     })
-                    .unwrap_or_else(|| "IDE Configs".to_string());
+                })
+                .collect();
 
-                let server_options = Self::build_server_options(&options, &config, server);
+            // Execute all scans in parallel and collect results
+            println!(
+                "🚀 Starting parallel scan of {} servers...",
+                scan_tasks.len()
+            );
 
-                // Scan the MCP server - HTTP or STDIO
-                if let Some(url) = server.scan_url() {
-                    // HTTP server scanning
-                    match self.scan_single(url, server_options).await {
-                        Ok(mut result) => {
-                            result.ide_source = Some(ide_source.clone());
-                            results.push(result);
-                        }
-                        Err(e) => {
-                            let mut failed_result = ScanResult::new(url.to_string());
-                            failed_result.status = ScanStatus::Failed(e.to_string());
-                            failed_result.ide_source = Some(ide_source.clone());
-                            results.push(failed_result);
-                        }
-                    }
-                } else if server.command.is_some() {
-                    // STDIO server scanning
-                    match self.scan_stdio_server(server, server_options).await {
-                        Ok(mut result) => {
-                            result.ide_source = Some(ide_source.clone());
-                            results.push(result);
-                        }
-                        Err(e) => {
-                            let mut failed_result = ScanResult::new(server.to_display_url());
-                            failed_result.status = ScanStatus::Failed(e.to_string());
-                            failed_result.ide_source = Some(ide_source.clone());
-                            results.push(failed_result);
-                        }
+            // Add timeout to prevent tasks from hanging indefinitely
+            let scan_results = tokio::time::timeout(
+                std::time::Duration::from_secs(300), // 5 minute timeout for all tasks
+                join_all(scan_tasks),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                warn!("Parallel scan tasks timed out after 5 minutes");
+                vec![] // Return empty results if timeout
+            });
+
+            // Extract results from join handles
+            for task_result in scan_results {
+                match task_result {
+                    Ok(scan_result) => results.push(scan_result),
+                    Err(e) => {
+                        // Task panicked or was cancelled
+                        let mut failed_result = ScanResult::new("task_failed".to_string());
+                        failed_result.status = ScanStatus::Failed(format!("Scan task failed: {e}"));
+                        failed_result.ide_source = Some("IDE Configs".to_string());
+                        results.push(failed_result);
                     }
                 }
+            }
+
+            // Clean up the main scanner after all parallel tasks complete
+            if let Err(e) = self.mcp_client.cleanup_all_sessions().await {
+                warn!("Failed to clean up main scanner sessions after parallel scan: {e}");
             }
         }
 
@@ -1355,10 +1793,10 @@ impl MCPScanner {
     async fn perform_scan_with_rmcp(&self, url: &str, options: &ScanOptions) -> Result<ScanData> {
         let mut scan_data = ScanData::new();
 
-        // Connect to MCP server using rmcp SDK
+        // Connect to MCP server using smart transport selection
         let session = self
             .mcp_client
-            .connect(url, options.auth_headers.clone())
+            .connect_smart(url, options.auth_headers.clone())
             .await?;
 
         // Add a small delay to allow the server to fully complete initialization
@@ -1419,6 +1857,11 @@ impl MCPScanner {
 
         // Store fetch errors in scan_data for later inclusion in final result
         scan_data.fetch_errors = fetch_errors;
+
+        // Clean up the session to prevent session deletion errors
+        if let Err(e) = self.mcp_client.cleanup_session(&session).await {
+            warn!("Failed to clean up MCP session: {}", e);
+        }
 
         Ok(scan_data)
     }
@@ -1492,6 +1935,11 @@ impl MCPScanner {
         // Store fetch errors in scan_data for later inclusion in final result
         scan_data.fetch_errors = fetch_errors;
 
+        // Clean up the session to prevent session deletion errors
+        if let Err(e) = self.mcp_client.cleanup_session(session).await {
+            warn!("Failed to clean up MCP session: {}", e);
+        }
+
         Ok(scan_data)
     }
 
@@ -1541,6 +1989,15 @@ impl ScanData {
             yara_results: Vec::new(),
             fetch_errors: Vec::new(),
         }
+    }
+}
+
+// Implement Drop for MCPScanner to ensure proper cleanup
+impl Drop for MCPScanner {
+    fn drop(&mut self) {
+        // Disable automatic cleanup in Drop to prevent race conditions in parallel scanning
+        // Cleanup is now handled explicitly in scan methods
+        debug!("MCPScanner dropped");
     }
 }
 

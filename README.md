@@ -35,10 +35,12 @@ MCP servers expose powerful capabilities—file systems, databases, APIs, and sy
 Ramparts provides **security scanning** of MCP servers by:
 
 1. **Discovering Capabilities**: Scans all MCP endpoints to identify available tools, resources, and prompts
-2. **Static Analysis**: Performs yara-based checks for common vulnerabilities
-3. **Cross-Origin Analysis**: Detects when tools span multiple domains, which could enable context hijacking or injection attacks
-4. **LLM-Powered Analysis**: Uses AI models to detect sophisticated security issues
-5. **Risk Assessment**: Categorizes findings by severity and provides actionable recommendations
+2. **Multi-Transport Support**: Supports HTTP, SSE, stdio, and subprocess transports with intelligent fallback
+3. **Session Management**: Handles stateful MCP servers with automatic session ID management
+4. **Static Analysis**: Performs yara-based checks for common vulnerabilities
+5. **Cross-Origin Analysis**: Detects when tools span multiple domains, which could enable context hijacking or injection attacks
+6. **LLM-Powered Analysis**: Uses AI models to detect sophisticated security issues
+7. **Risk Assessment**: Categorizes findings by severity and provides actionable recommendations
 >
 > **💡 Jump directly to detailed Rampart features?**
 > [**📚 Detailed Features**](docs/features.md)
@@ -71,6 +73,10 @@ ramparts scan https://api.githubcopilot.com/mcp/ --auth-headers "Authorization: 
 
 # Generate detailed markdown report (scan_YYYYMMDD_HHMMSS.md)
 ramparts scan https://api.githubcopilot.com/mcp/ --auth-headers "Authorization: Bearer $TOKEN" --report
+
+# Scan stdio/subprocess MCP servers
+ramparts scan "stdio:npx:mcp-server-commands"
+ramparts scan "stdio:python3:/path/to/mcp_server.py"
 ```
 
 **Scan your IDE's MCP configurations**
@@ -84,6 +90,14 @@ ramparts scan-config --report
 
 > **💡 Did you know you can start Ramparts as a server?** Run `ramparts server` to get a REST API for continuous monitoring and CI/CD integration. See 📚 **[Ramparts Server Mode](docs/api.md)** 
 
+### Run as an MCP server (stdio)
+
+```bash
+ramparts mcp-stdio
+```
+
+When publishing to Docker MCP Toolkit, configure the container command to `ramparts mcp-stdio` so the toolkit connects via stdio. Use `MCP-Dockerfile` to make this the default.
+
 ## Example Output
 
 **Single server scan:**
@@ -95,41 +109,23 @@ ramparts scan https://api.githubcopilot.com/mcp/ --auth-headers "Authorization: 
 RAMPARTS
 MCP Security Scanner
 
-Version: 0.6.7
+Version: 0.7.0
 Current Time: 2025-08-04 07:32:19 UTC
 Git Commit: 9d0c37c
 
 🌐 GitHub Copilot MCP Server
   ✅ All tools passed security checks
 
-  └── push_files passed
-  └── create_or_update_file warning
-      📋 Analysis: Standard GitHub file creation/update functionality
-      ├── HIGH: Tool allowing directory traversal attacks: Potential Path Traversal Vulnerability
-      │   Details: The tool accepts a 'path' parameter without proper validation, allowing potential path traversal attacks.
-
-YARA Scan Results
-================================================================================
-⚠️ PRE-SCAN - WARNING
-  Context: Pre-scan completed: 5 rules executed on 83 items
-  Items scanned: 83
-  Security matches: 2
-  Rules executed: secrets_leakage:*, command_injection:*, path_traversal:*, sql_injection:*, cross_origin_escalation:*
-  Security issues detected: secrets_leakage:EnvironmentVariableLeakage
-
-🔍 Detailed Results:
-⚠️ get_secret_scanning_alert (tool)
-  Rule: EnvironmentVariableLeakage (MEDIUM)
-  Context: Sensitive environment variable pattern detected in tool
-
-⚠️ list_secret_scanning_alerts (tool)  
-  Rule: EnvironmentVariableLeakage (MEDIUM)
-  Context: Sensitive environment variable pattern detected in tool
+  └── push_files ✅ passed
+  └── create_or_update_file ⚠️ 2 warnings
+      │   └── 🟠 HIGH (LLM): Tool allowing directory traversal attacks
+      │   └── 🟠 HIGH (YARA): EnvironmentVariableLeakage
+  └── get_secret_scanning_alert ⚠️ 1 warning
+      │   └── 🟠 HIGH (YARA): EnvironmentVariableLeakage
 
 Summary:
   • Tools scanned: 83
-  • Security matches: 2 medium-severity findings
-================================================================================
+  • Security issues: 3 findings
 ```
 
 **IDE configuration scan:**

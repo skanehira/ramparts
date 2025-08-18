@@ -216,6 +216,16 @@ For command-line MCP servers:
 }
 ```
 
+### Containerized Servers (Docker MCP Toolkit)
+For servers running inside containers (e.g., Docker MCP Toolkit):
+```json
+{
+    "image": "ghcr.io/getjavelin/ramparts:latest",
+    "command": ["/app/ramparts", "mcp-stdio"],
+    "description": "Ramparts MCP server over stdio"
+}
+```
+
 ### HTTP Servers
 For HTTP-based MCP servers:
 ```json
@@ -267,11 +277,13 @@ Ramparts performs comprehensive security analysis on all discovered MCP servers:
 
 ## Version Compatibility
 
-- **Ramparts**: v0.6.3+
+- **Ramparts**: Latest version
 - **MCP Protocol**: 2025-03-26
 - **Node.js Servers**: All versions with MCP support
 - **Python Servers**: All versions with MCP support
 - **HTTP Servers**: Standard HTTP/HTTPS with MCP protocol
+
+
 
 ## Contributing
 

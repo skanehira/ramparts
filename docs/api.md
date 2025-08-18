@@ -38,6 +38,8 @@ ramparts server --port 8080 --host 0.0.0.0
 
 Once started, the server provides a REST API with the following endpoints:
 
+
+
 ## API Endpoints
 
 ### 1. Health Check
@@ -72,9 +74,11 @@ Get detailed MCP protocol information and supported capabilities.
       "http": "supported",
       "features": [
         "JSON-RPC 2.0",
-        "Session Management",
-        "Protocol Version Headers",
+        "Stateful Session Management",
+        "Protocol Version Headers", 
         "STDIO Process Communication",
+        "Intelligent Transport Fallback",
+        "rmcp Library Integration",
         "Multi-Transport Support"
       ]
     },
@@ -115,7 +119,8 @@ Get interactive API documentation with examples.
   "transports": {
     "http": {
       "supported": true,
-      "description": "HTTP/HTTPS transport for remote MCP servers",
+      "description": "HTTP/HTTPS transport with intelligent fallback (simple HTTP, rmcp streamable, SSE)",
+      "features": ["session_management", "authentication_headers", "automatic_fallback"],
       "examples": [
         "http://localhost:3000",
         "https://api.githubcopilot.com/mcp"
@@ -123,10 +128,12 @@ Get interactive API documentation with examples.
     },
     "stdio": {
       "supported": true,
-      "description": "STDIO transport for local MCP server processes",
+      "description": "STDIO transport for local MCP server processes using rmcp subprocess implementation",
+      "features": ["process_management", "argument_parsing", "concurrent_execution"],
       "examples": [
-        "stdio:///usr/local/bin/mcp-server",
-        "stdio://node /path/to/mcp-server.js"
+        "stdio:npx:mcp-server-commands",
+        "stdio:python3:/path/to/server.py",
+        "stdio:///usr/local/bin/mcp-server"
       ]
     }
   }
@@ -228,42 +235,69 @@ curl -X POST http://localhost:3000/scan \
         "parameters": {},
         "category": "file_system",
         "tags": ["write", "create"],
-        "deprecated": false
+        "deprecated": false,
+        "llm_analysis": "The create_file tool accepts a path parameter that could be vulnerable to path traversal attacks if not properly validated.",
+        "security_scan_results": [
+          {
+            "scan_type": "llm_analysis",
+            "issue_type": "PathTraversal",
+            "severity": "HIGH",
+            "message": "Tool vulnerable to path traversal attacks",
+            "description": "Tool allows potential path traversal attacks",
+            "details": "The path parameter is not validated, allowing potential directory traversal"
+          },
+          {
+            "scan_type": "yara_rules",
+            "rule_name": "PathTraversalVulnerability",
+            "rule_file": "path_traversal",
+            "context": "Path traversal vulnerability detected in tool",
+            "rule_metadata": {
+              "severity": "HIGH",
+              "description": "Detects potential path traversal vulnerabilities"
+            }
+          }
+        ]
       }
     ],
     "resources": [],
     "prompts": [],
     "security_issues": {
-      "total_issues": 1,
-      "critical_count": 0,
-      "high_count": 1,
-      "medium_count": 0,
-      "low_count": 0,
-      "tool_issues": [
+      "issues": [
         {
-          "tool_name": "create_file",
+          "scan_type": "llm_analysis",
+          "target_type": "tool",
+          "target_name": "create_file",
+          "issue_type": "PathTraversal",
           "severity": "HIGH",
-          "issue_type": "path_traversal",
-          "message": "Tool allows potential path traversal attacks",
-          "details": "The 'path' parameter lacks proper validation"
+          "message": "Tool vulnerable to path traversal attacks",
+          "description": "Tool allows potential path traversal attacks",
+          "details": "The path parameter is not validated, allowing potential directory traversal"
+        },
+        {
+          "scan_type": "yara_rules",
+          "target_type": "tool",
+          "target_name": "create_file",
+          "rule_name": "PathTraversalVulnerability",
+          "rule_file": "path_traversal",
+          "context": "Path traversal vulnerability detected in tool",
+          "rule_metadata": {
+            "severity": "HIGH",
+            "description": "Detects potential path traversal vulnerabilities"
+          }
         }
       ],
-      "prompt_issues": [],
-      "resource_issues": []
+      "llm_issues_count": 1,
+      "yara_issues_count": 1,
+      "total_issues_count": 2
     },
-    "yara_results": [
-      {
-        "target_type": "summary",
-        "target_name": "pre-scan",
-        "rule_name": "PreScanSummary",
-        "context": "Pre-scan completed: 2 rules executed on 1 items",
-        "total_items_scanned": 1,
-        "total_matches": 1,
-        "rules_executed": ["secrets_leakage", "path_traversal"],
-        "security_issues_detected": ["path_traversal:PathTraversalVulnerability"],
-        "status": "warning"
-      }
-    ],
+    "security_scan_summary": {
+      "total_security_issues": 2,
+      "llm_scan_issues": 1,
+      "yara_scan_issues": 1,
+      "tool_issues": 1,
+      "resource_issues": 0,
+      "prompt_issues": 0
+    },
     "errors": []
   },
   "error": null,
@@ -376,8 +410,7 @@ curl -X POST http://localhost:3000/batch-scan \
         "tools": [ /* Tools array */ ],
         "resources": [],
         "prompts": [],
-        "security_issues": { /* Security issues object */ },
-        "yara_results": [ /* YARA results array */ ],
+        "security_scan_summary": { /* Security scan summary */ },
         "errors": []
       },
       "error": null,
@@ -394,8 +427,7 @@ curl -X POST http://localhost:3000/batch-scan \
         "tools": [],
         "resources": [],
         "prompts": [],
-        "security_issues": null,
-        "yara_results": [],
+        "security_scan_summary": null,
         "errors": ["Scan operation failed: Failed to initialize MCP session with any protocol version"]
       },
       "error": null,

@@ -795,6 +795,12 @@ impl MCPConfigManager {
             current_dir.join(".cursor").join("settings.json"),
             MCPClient::Cursor,
         ));
+        // Cursor repo-embedded MCP configuration used by some editors
+        // Example: .cursor/rules/mcp.json (supply-chain sensitive)
+        paths.push((
+            current_dir.join(".cursor").join("rules").join("mcp.json"),
+            MCPClient::Cursor,
+        ));
 
         // Claude Code workspace configurations
         paths.push((
@@ -847,6 +853,11 @@ impl MCPConfigManager {
 
                 // Cursor project root configurations
                 paths.push((dir.join(".cursor").join("mcp.json"), MCPClient::Cursor));
+                // Cursor repo-embedded MCP configuration in project root
+                paths.push((
+                    dir.join(".cursor").join("rules").join("mcp.json"),
+                    MCPClient::Cursor,
+                ));
 
                 // Claude Code project root configurations
                 paths.push((
@@ -3417,7 +3428,7 @@ impl Default for ScannerConfig {
             llm: LLMConfig {
                 provider: "openai".to_string(),
                 model: "gpt-4o".to_string(),
-                base_url: "https://api.openai.com/v1".to_string(),
+                base_url: "https://api.openai.com/v1/chat/completions".to_string(),
                 api_key: String::new(),
                 timeout: 30,
                 max_tokens: 4000,

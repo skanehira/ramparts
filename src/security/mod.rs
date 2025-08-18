@@ -8,6 +8,7 @@ use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde_json::{json, Value};
 use spinners::{Spinner, Spinners};
+use tracing::{debug, error};
 
 /// Trait for items that can be batch scanned for security issues
 pub trait BatchScannableItem {
@@ -285,7 +286,8 @@ impl SecurityScanner {
             Some(config.llm.api_key.clone())
         };
 
-        let model_endpoint = Some(format!("{}/chat/completions", config.llm.base_url));
+        // Option 2: Use complete URLs as-is, never append anything
+        let model_endpoint = Some(config.llm.base_url.clone());
 
         Self {
             model_endpoint,
@@ -520,7 +522,7 @@ impl SecurityScanner {
     }
 
     /// Create tools analysis prompt
-    fn create_tools_analysis_prompt(tools_info: &str) -> String {
+    pub fn create_tools_analysis_prompt(tools_info: &str) -> String {
         format!(
             "ROLE
 You are a Senior Application Security Engineer reviewing MCP tool definitions for real security issues. MCP tools run within an authenticated server context — do not flag missing auth parameters unless there's a clear bypass.
@@ -577,7 +579,7 @@ Be accurate. Flag only real risks — don't overreport."
     }
 
     /// Create prompts analysis prompt
-    fn create_prompts_analysis_prompt(prompts_info: &str) -> String {
+    pub fn create_prompts_analysis_prompt(prompts_info: &str) -> String {
         format!(
             "Analyze these MCP prompts for ALL potential security vulnerabilities in a single comprehensive assessment.
 
@@ -632,7 +634,7 @@ If no genuine security issues found, return empty array []."
     }
 
     /// Create resources analysis prompt
-    fn create_resources_analysis_prompt(resources_info: &str) -> String {
+    pub fn create_resources_analysis_prompt(resources_info: &str) -> String {
         format!(
             "Analyze these MCP resources for ALL potential security vulnerabilities in a single comprehensive assessment.
 
@@ -655,11 +657,65 @@ If no genuine security issues found, return empty array []."
         )
     }
 
+    /// Build the exact LLM request body (without sending it) using current config
+    pub fn build_llm_request_body(&self, prompt: &str) -> Value {
+        let temperature = self.config.as_ref().map_or(0.1, |c| c.llm.temperature);
+        let max_tokens = self.config.as_ref().map_or(4000, |c| c.llm.max_tokens);
+
+        json!({
+            "model": self.model_name,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a security analyst specializing in detecting vulnerabilities in MCP (Model Context Protocol) tools, prompts, and resources. Your job is to identify potential security risks, even if they seem minor. Look for any security issues that could be exploited or lead to unauthorized access.\n\nCRITICAL: You must respond with ONLY a valid JSON array. Do not include any explanatory text, markdown formatting, or other content outside the JSON array. \n\nIMPORTANT: You must analyze EVERY tool and include it in your response, even if no security issues are found. For tools with no issues, set found_issue: false and provide details about why no issues were found.\n\nExample valid response: [{\"tool_name\": \"example\", \"found_issue\": true, \"issues\": [{\"issue_type\": \"SQLInjection\", \"severity\": \"HIGH\", \"message\": \"Brief description\", \"details\": \"Detailed explanation\"}], \"details\": \"Additional context\"}]"
+                },
+                { "role": "user", "content": prompt }
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        })
+    }
+
+    /// Get the configured LLM endpoint (if any)
+    pub fn get_endpoint(&self) -> Option<String> {
+        self.model_endpoint.clone()
+    }
+
     /// Query the LLM with the given prompt
     async fn query_llm(&self, prompt: &str, show_details: bool) -> Result<String> {
-        // Early validation of LLM configuration
+        // Enhanced validation with detailed error messages
         if !self.is_llm_configured() {
-            return Err(anyhow!("LLM not configured: missing endpoint or API key"));
+            let endpoint_status = if self.model_endpoint.is_some() {
+                "✅"
+            } else {
+                "❌"
+            };
+            let api_key_status = if self.api_key.is_some() { "✅" } else { "❌" };
+
+            error!("🚨 LLM Configuration Check Failed:");
+            error!(
+                "   Endpoint configured: {} {}",
+                endpoint_status,
+                self.model_endpoint.as_deref().unwrap_or("NOT SET")
+            );
+            error!(
+                "   API key configured: {} {}",
+                api_key_status,
+                if self.api_key.is_some() {
+                    "SET (hidden)"
+                } else {
+                    "NOT SET"
+                }
+            );
+            error!(
+                "   💡 Hint: Set OPENAI_API_KEY environment variable or configure in ramparts.yaml"
+            );
+
+            return Err(anyhow!(
+                "LLM not configured: missing endpoint ({}) or API key ({})",
+                endpoint_status,
+                api_key_status
+            ));
         }
 
         let client = Client::new();
@@ -668,6 +724,25 @@ If no genuine security issues found, return empty array []."
         let temperature = self.config.as_ref().map_or(0.1, |c| c.llm.temperature);
         let max_tokens = self.config.as_ref().map_or(4000, |c| c.llm.max_tokens);
         let timeout = self.config.as_ref().map_or(30, |c| c.llm.timeout);
+
+        // Get validated LLM configuration
+        let (endpoint, api_key) = self.get_llm_config()?;
+
+        debug!("🔧 LLM Configuration:");
+        debug!("   Endpoint: {}", endpoint);
+        debug!("   Model: {}", self.model_name);
+        debug!("   Temperature: {}", temperature);
+        debug!("   Max tokens: {}", max_tokens);
+        debug!("   Timeout: {}s", timeout);
+        debug!(
+            "   API key: {}...{}",
+            &api_key[..8.min(api_key.len())],
+            if api_key.len() > 16 {
+                &api_key[api_key.len() - 8..]
+            } else {
+                "***"
+            }
+        );
 
         let request_body = json!({
             "model": self.model_name,
@@ -705,29 +780,167 @@ Example valid response: [{\"tool_name\": \"example\", \"found_issue\": true, \"i
             "Scanning for security vulnerabilities...(this may take a while)".into(),
         );
 
-        // Get validated LLM configuration
-        let (endpoint, api_key) = self.get_llm_config()?;
+        debug!("📡 Sending LLM API request to: {}", endpoint);
 
-        let response = client
+        let response = match client
             .post(endpoint)
             .header("Authorization", format!("Bearer {api_key}"))
             .header("Content-Type", "application/json")
             .timeout(std::time::Duration::from_secs(timeout))
             .json(&request_body)
             .send()
-            .await?;
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                sp.stop();
+                error!("🚨 LLM API Request Failed:");
+                error!("   Endpoint: {}", endpoint);
+                error!("   Error: {}", e);
+
+                if e.is_timeout() {
+                    error!("   💡 Hint: Request timed out after {}s. Try increasing timeout in config.", timeout);
+                } else if e.is_connect() {
+                    error!("   💡 Hint: Cannot connect to endpoint. Check your internet connection and endpoint URL.");
+                } else if e.to_string().contains("dns") {
+                    error!("   💡 Hint: DNS resolution failed. Check the endpoint URL.");
+                } else {
+                    error!("   💡 Hint: Network error occurred. Check connectivity and endpoint configuration.");
+                }
+
+                return Err(anyhow!("LLM API network request failed: {}", e));
+            }
+        };
 
         // Stop spinner
         sp.stop();
 
-        if !response.status().is_success() {
-            return Err(anyhow!("LLM API request failed: {}", response.status()));
+        let status = response.status();
+        debug!("📥 LLM API Response Status: {}", status);
+
+        if !status.is_success() {
+            // Get response body for better error diagnostics
+            let error_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unable to read error response".to_string());
+
+            error!("🚨 LLM API Request Failed with Status: {}", status);
+            error!("   Endpoint: {}", endpoint);
+            error!("   Model: {}", self.model_name);
+
+            match status.as_u16() {
+                401 => {
+                    error!("   🔑 Authentication Error: Invalid API key");
+                    error!(
+                        "   💡 Hint: Check your API key is correct and has sufficient permissions"
+                    );
+                    error!(
+                        "   💡 Current key starts with: {}...",
+                        &api_key[..8.min(api_key.len())]
+                    );
+                }
+                403 => {
+                    error!("   🚫 Authorization Error: API key lacks required permissions");
+                    error!(
+                        "   💡 Hint: Ensure your API key has access to the {} model",
+                        self.model_name
+                    );
+                }
+                404 => {
+                    error!("   🔍 Not Found Error: Invalid endpoint or model");
+                    error!("   💡 Hint: Check if endpoint '{}' is correct", endpoint);
+                    error!(
+                        "   💡 Hint: Check if model '{}' is available",
+                        self.model_name
+                    );
+                }
+                429 => {
+                    error!("   ⏰ Rate Limit Error: Too many requests");
+                    error!("   💡 Hint: Reduce llm_batch_size in config or wait before retrying");
+                }
+                500..=599 => {
+                    error!("   🔥 Server Error: LLM provider is experiencing issues");
+                    error!("   💡 Hint: Try again later or check LLM provider status");
+                }
+                _ => {
+                    error!("   ❓ Unexpected Error: {}", status);
+                }
+            }
+
+            if !error_body.is_empty() && error_body.len() < 500 {
+                error!("   Response: {}", error_body);
+            }
+
+            return Err(anyhow!(
+                "LLM API request failed: {} - {}",
+                status,
+                if error_body.len() > 100 {
+                    "See logs for details"
+                } else {
+                    &error_body
+                }
+            ));
         }
 
-        let response_json: Value = response.json().await?;
+        // Read response as text first to enable logging on parse failures
+        let response_text = match response.text().await {
+            Ok(text) => text,
+            Err(e) => {
+                error!("🚨 LLM API Response Read Failed:");
+                error!("   Error: {}", e);
+                error!("   💡 Hint: Unable to read response body");
+                return Err(anyhow!("Failed to read LLM response body: {}", e));
+            }
+        };
+
+        debug!(
+            "📥 LLM API Raw Response: {}",
+            if response_text.len() > 500 {
+                format!(
+                    "{}... (truncated, {} chars total)",
+                    &response_text[..500],
+                    response_text.len()
+                )
+            } else {
+                response_text.clone()
+            }
+        );
+
+        let response_json: Value = match serde_json::from_str(&response_text) {
+            Ok(json) => json,
+            Err(e) => {
+                error!("🚨 LLM API Response Parsing Failed:");
+                error!("   Error: {}", e);
+                error!(
+                    "   Raw Response Body: {}",
+                    if response_text.len() > 1000 {
+                        format!("{}... (truncated)", &response_text[..1000])
+                    } else {
+                        response_text
+                    }
+                );
+                error!("   💡 Hint: Response may not be valid JSON - check LLM provider status");
+                return Err(anyhow!("Failed to parse LLM response as JSON: {}", e));
+            }
+        };
+
         let content = response_json["choices"][0]["message"]["content"]
             .as_str()
-            .ok_or_else(|| anyhow!("Invalid LLM response format"))?;
+            .ok_or_else(|| {
+                error!("🚨 LLM Response Format Error:");
+                error!("   Expected: choices[0].message.content");
+                error!(
+                    "   Got: {}",
+                    serde_json::to_string_pretty(&response_json).unwrap_or_default()
+                );
+                anyhow!("Invalid LLM response format: missing choices[0].message.content")
+            })?;
+
+        debug!(
+            "✅ LLM API call successful, response length: {} chars",
+            content.len()
+        );
 
         if show_details {
             println!("\n🤖 LLM Response:");
@@ -1041,5 +1254,196 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("LLM not configured"));
+    }
+
+    #[test]
+    fn test_azure_openai_endpoint_construction_with_api_version() {
+        // Test that Azure OpenAI URLs with api-version query parameter are handled correctly
+        let azure_base_url = "https://my-resource.openai.azure.com/openai/deployments/gpt-4?api-version=2024-02-15-preview";
+
+        let config = crate::config::ScannerConfig {
+            llm: crate::config::LLMConfig {
+                provider: "openai".to_string(),
+                model: "gpt-4".to_string(),
+                base_url: azure_base_url.to_string(),
+                api_key: "test-key".to_string(),
+                timeout: 30,
+                max_tokens: 4000,
+                temperature: 0.1,
+            },
+            scanner: crate::config::ScannerSettings {
+                http_timeout: 30,
+                scan_timeout: 60,
+                detailed: false,
+                format: "table".to_string(),
+                parallel: true,
+                max_retries: 3,
+                retry_delay_ms: 1000,
+                llm_batch_size: 10,
+                enable_yara: true,
+            },
+            security: crate::config::SecurityConfig {
+                enabled: true,
+                min_severity: "low".to_string(),
+                checks: crate::config::SecurityChecks {
+                    tool_poisoning: true,
+                    secrets_leakage: true,
+                    sql_injection: true,
+                    command_injection: true,
+                    path_traversal: true,
+                    auth_bypass: true,
+                    prompt_injection: true,
+                    pii_leakage: true,
+                    jailbreak: true,
+                },
+            },
+            logging: crate::config::LoggingConfig {
+                level: "info".to_string(),
+                colored: true,
+                timestamps: true,
+            },
+            performance: crate::config::PerformanceConfig {
+                tracking: true,
+                slow_threshold_ms: 5000,
+            },
+        };
+
+        let scanner = SecurityScanner::with_config(config);
+
+        // Verify the endpoint uses base_url as-is (no automatic appending)
+        let expected_endpoint = azure_base_url;
+        assert_eq!(scanner.model_endpoint.as_ref().unwrap(), expected_endpoint);
+
+        // Verify LLM config extraction works
+        let llm_config = scanner.get_llm_config();
+        assert!(llm_config.is_ok());
+        let (endpoint, api_key) = llm_config.unwrap();
+        assert_eq!(endpoint, expected_endpoint);
+        assert_eq!(api_key, "test-key");
+    }
+
+    #[test]
+    fn test_standard_openai_endpoint_construction() {
+        // Test that standard OpenAI URLs work as expected (baseline test)
+        let openai_base_url = "https://api.openai.com/v1";
+
+        let config = crate::config::ScannerConfig {
+            llm: crate::config::LLMConfig {
+                provider: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+                base_url: openai_base_url.to_string(),
+                api_key: "test-key".to_string(),
+                timeout: 30,
+                max_tokens: 4000,
+                temperature: 0.1,
+            },
+            scanner: crate::config::ScannerSettings {
+                http_timeout: 30,
+                scan_timeout: 60,
+                detailed: false,
+                format: "table".to_string(),
+                parallel: true,
+                max_retries: 3,
+                retry_delay_ms: 1000,
+                llm_batch_size: 10,
+                enable_yara: true,
+            },
+            security: crate::config::SecurityConfig {
+                enabled: true,
+                min_severity: "low".to_string(),
+                checks: crate::config::SecurityChecks {
+                    tool_poisoning: true,
+                    secrets_leakage: true,
+                    sql_injection: true,
+                    command_injection: true,
+                    path_traversal: true,
+                    auth_bypass: true,
+                    prompt_injection: true,
+                    pii_leakage: true,
+                    jailbreak: true,
+                },
+            },
+            logging: crate::config::LoggingConfig {
+                level: "info".to_string(),
+                colored: true,
+                timestamps: true,
+            },
+            performance: crate::config::PerformanceConfig {
+                tracking: true,
+                slow_threshold_ms: 5000,
+            },
+        };
+
+        let scanner = SecurityScanner::with_config(config);
+
+        // Verify standard endpoint uses base_url as-is (no automatic appending)
+        let expected_endpoint = openai_base_url;
+        assert_eq!(scanner.model_endpoint.as_ref().unwrap(), expected_endpoint);
+    }
+
+    #[test]
+    fn test_various_query_parameter_scenarios() {
+        // Test various URL formats to ensure they're used as-is (no automatic appending)
+        let test_cases = vec![
+            "https://api.example.com/v1?api_key=test123",
+            "https://my-azure.openai.azure.com/openai/deployments/gpt-4?api-version=2024-02-15-preview&extra=param",
+            "https://local.ai:8080/v1?model=custom&timeout=30",
+        ];
+
+        for base_url in test_cases {
+            let config = crate::config::ScannerConfig {
+                llm: crate::config::LLMConfig {
+                    provider: "openai".to_string(),
+                    model: "test-model".to_string(),
+                    base_url: base_url.to_string(),
+                    api_key: "test-key".to_string(),
+                    timeout: 30,
+                    max_tokens: 4000,
+                    temperature: 0.1,
+                },
+                scanner: crate::config::ScannerSettings {
+                    http_timeout: 30,
+                    scan_timeout: 60,
+                    detailed: false,
+                    format: "table".to_string(),
+                    parallel: true,
+                    max_retries: 3,
+                    retry_delay_ms: 1000,
+                    llm_batch_size: 10,
+                    enable_yara: true,
+                },
+                security: crate::config::SecurityConfig {
+                    enabled: true,
+                    min_severity: "low".to_string(),
+                    checks: crate::config::SecurityChecks {
+                        tool_poisoning: true,
+                        secrets_leakage: true,
+                        sql_injection: true,
+                        command_injection: true,
+                        path_traversal: true,
+                        auth_bypass: true,
+                        prompt_injection: true,
+                        pii_leakage: true,
+                        jailbreak: true,
+                    },
+                },
+                logging: crate::config::LoggingConfig {
+                    level: "info".to_string(),
+                    colored: true,
+                    timestamps: true,
+                },
+                performance: crate::config::PerformanceConfig {
+                    tracking: true,
+                    slow_threshold_ms: 5000,
+                },
+            };
+
+            let scanner = SecurityScanner::with_config(config);
+            assert_eq!(
+                scanner.model_endpoint.as_ref().unwrap(),
+                base_url,
+                "Failed for base_url: {base_url}"
+            );
+        }
     }
 }
