@@ -59,6 +59,9 @@ thiserror = "1.0"
 # URL parsing
 url = "2.4"
 
+# Regular expressions for environment variable expansion
+regex = "1.10"
+
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
 
