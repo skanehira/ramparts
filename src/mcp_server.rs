@@ -115,11 +115,7 @@ impl RampartsMcpServer {
             auth_headers: p.auth_headers,
             // Default to returning prompts (no LLM call) for MCP tool flow
             return_prompts: Some(p.return_prompts.unwrap_or(true)),
-            javelin_mcp_url: None,
-            reference_mcp_url: None,
-            force_scan: None,
-            include_diff: None,
-            change_detection: None,
+            reference_url: None,
         };
 
         let resp = self.core.scan(request).await;
