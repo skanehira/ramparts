@@ -58,6 +58,15 @@ struct ScanConfigParams {
     return_prompts: Option<bool>,
 }
 
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct RefreshToolsParams {
+    urls: Vec<String>,
+    #[serde(default)]
+    auth_headers: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    timeout: Option<u64>,
+}
+
 /// Minimal MCP server that exposes basic tools. Extend to integrate scanner endpoints as tools.
 #[derive(Clone)]
 pub struct RampartsMcpServer {
@@ -106,6 +115,11 @@ impl RampartsMcpServer {
             auth_headers: p.auth_headers,
             // Default to returning prompts (no LLM call) for MCP tool flow
             return_prompts: Some(p.return_prompts.unwrap_or(true)),
+            javelin_mcp_url: None,
+            reference_mcp_url: None,
+            force_scan: None,
+            include_diff: None,
+            change_detection: None,
         };
 
         let resp = self.core.scan(request).await;
@@ -158,6 +172,35 @@ impl RampartsMcpServer {
             .await
             .map_err(|e| ErrorData::invalid_request(e.to_string(), None))?;
         let json = serde_json::to_string(&results)
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        name = "refresh-tools",
+        description = "Refresh tool descriptions from one or more MCP servers"
+    )]
+    async fn refresh_tools(
+        &self,
+        params: Parameters<RefreshToolsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+
+        if p.urls.is_empty() {
+            return Err(ErrorData::invalid_request(
+                "At least one URL must be provided".to_string(),
+                None,
+            ));
+        }
+
+        let request = crate::core::RefreshToolsRequest {
+            urls: p.urls,
+            auth_headers: p.auth_headers,
+            timeout: p.timeout,
+        };
+
+        let resp = self.core.refresh_tools(request).await;
+        let json = serde_json::to_string(&resp)
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
