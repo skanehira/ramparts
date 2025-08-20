@@ -1,12 +1,32 @@
 use crate::config::{ScannerConfig, ScannerConfigManager};
 use crate::scanner::MCPScanner;
-use crate::storage::{ChangeSummary, ToolChange, ToolStorage};
+
 use crate::types::{config_utils, MCPTool, ScanConfigBuilder, ScanOptions, ScanResult};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+
 use tracing::warn;
+
+/// Summary of changes detected between tool sets
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChangeSummary {
+    pub tools_added: Vec<String>,
+    pub tools_removed: Vec<String>,
+    pub tools_modified: Vec<ToolChange>,
+    pub total_changes: usize,
+    pub change_types: Vec<String>,
+}
+
+/// Details of a specific tool modification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolChange {
+    pub tool_name: String,
+    pub field: String,
+    pub old_value: Option<serde_json::Value>,
+    pub new_value: Option<serde_json::Value>,
+    pub diff: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ScanRequest {
@@ -113,7 +133,6 @@ pub struct ListRegisteredServersResponse {
 pub struct MCPScannerCore {
     scanner: MCPScanner,
     config_manager: ScannerConfigManager,
-    storage: Arc<ToolStorage>,
 }
 
 impl MCPScannerCore {
@@ -127,13 +146,9 @@ impl MCPScannerCore {
             }
         };
 
-        // Initialize tool storage
-        let storage = Arc::new(ToolStorage::new("./tool_storage")?);
-
         Ok(Self {
             scanner: MCPScanner::with_timeout(scanner_config.scanner.http_timeout)?,
             config_manager,
-            storage,
         })
     }
 
@@ -231,72 +246,91 @@ impl MCPScannerCore {
     async fn scan_with_change_detection(&self, request: ScanRequest) -> ScanResponse {
         let timestamp = chrono::Utc::now().to_rfc3339();
 
-        // Step 1: Get current tools (refresh if needed)
-        let current_tools = match self.get_current_tools(&request).await {
-            Ok(tools) => tools,
-            Err(e) => {
-                return ScanResponse {
-                    success: false,
-                    result: None,
-                    error: Some(format!("Failed to get current tools: {e}")),
+        if let Some(ref_url) = &request.reference_url {
+            // Case 1: Reference URL provided - scan BOTH URLs and compare
+
+            // Scan main URL
+            let main_scan_result = match self.perform_scan_internal(request.clone()).await {
+                Ok(result) => result,
+                Err(e) => {
+                    return ScanResponse {
+                        success: false,
+                        result: None,
+                        error: Some(format!("Failed to scan main URL: {e}")),
+                        timestamp,
+                        refresh_happened: false,
+                        changes_detected: false,
+                        change_summary: None,
+                        scan_skipped: false,
+                        cache_hit: false,
+                    }
+                }
+            };
+
+            // Scan reference URL
+            let reference_tools = match self
+                .fetch_tools_from_url(ref_url, &request.auth_headers)
+                .await
+            {
+                Ok(tools) => tools,
+                Err(e) => {
+                    return ScanResponse {
+                        success: false,
+                        result: Some(main_scan_result), // Still return main scan result
+                        error: Some(format!("Failed to scan reference URL: {e}")),
+                        timestamp,
+                        refresh_happened: true,
+                        changes_detected: false,
+                        change_summary: None,
+                        scan_skipped: false,
+                        cache_hit: false,
+                    };
+                }
+            };
+
+            // Compare the two scans
+            let changes_detected =
+                self.tools_have_changed(&reference_tools, &main_scan_result.tools);
+            let change_summary =
+                Some(self.generate_change_summary(&reference_tools, &main_scan_result.tools));
+
+            ScanResponse {
+                success: true,
+                result: Some(main_scan_result),
+                error: None,
+                timestamp,
+                refresh_happened: true,
+                changes_detected,
+                change_summary,
+                scan_skipped: false,
+                cache_hit: false,
+            }
+        } else {
+            // Case 2: No reference URL - just scan main URL
+            match self.perform_scan_internal(request).await {
+                Ok(result) => ScanResponse {
+                    success: true,
+                    result: Some(result),
+                    error: None,
                     timestamp,
                     refresh_happened: false,
                     changes_detected: false,
                     change_summary: None,
                     scan_skipped: false,
                     cache_hit: false,
-                }
+                },
+                Err(e) => ScanResponse {
+                    success: false,
+                    result: None,
+                    error: Some(e.to_string()),
+                    timestamp,
+                    refresh_happened: false,
+                    changes_detected: false,
+                    change_summary: None,
+                    scan_skipped: false,
+                    cache_hit: false,
+                },
             }
-        };
-
-        // Step 2: Get reference tools for comparison
-        let reference_tools = self.get_reference_tools(&request).await.unwrap_or_default();
-
-        // Step 3: Detect changes
-        let changes_detected = if reference_tools.is_empty() {
-            true // First time, consider it changed
-        } else {
-            self.tools_have_changed(&reference_tools, &current_tools)
-        };
-
-        // Step 4: Store current snapshot (always store when doing change detection)
-        if let Err(e) = self
-            .storage
-            .store_snapshot(&request.url, current_tools.clone())
-            .await
-        {
-            warn!("Failed to store tool snapshot: {}", e);
-        }
-
-        // Step 5: Always generate change summary when doing change detection
-        let change_summary = Some(self.generate_change_summary(&reference_tools, &current_tools));
-
-        // Step 6: Always perform the scan (simplified logic)
-
-        // Step 7: Perform actual scan
-        match self.perform_scan_internal(request).await {
-            Ok(result) => ScanResponse {
-                success: true,
-                result: Some(result),
-                error: None,
-                timestamp,
-                refresh_happened: true, // Always true when doing change detection
-                changes_detected,
-                change_summary,
-                scan_skipped: false,
-                cache_hit: false,
-            },
-            Err(e) => ScanResponse {
-                success: false,
-                result: None,
-                error: Some(e.to_string()),
-                timestamp,
-                refresh_happened: true, // Always true when doing change detection
-                changes_detected,
-                change_summary,
-                scan_skipped: false,
-                cache_hit: false,
-            },
         }
     }
 
@@ -410,29 +444,6 @@ impl MCPScannerCore {
         }
     }
 
-    /// Get current tools from main URL
-    async fn get_current_tools(&self, request: &ScanRequest) -> Result<Vec<MCPTool>> {
-        // Always scan the main URL
-        self.fetch_tools_from_url(&request.url, &request.auth_headers)
-            .await
-    }
-
-    /// Get reference tools for comparison
-    async fn get_reference_tools(&self, request: &ScanRequest) -> Result<Vec<MCPTool>> {
-        if let Some(ref_url) = &request.reference_url {
-            // Fetch from reference URL
-            self.fetch_tools_from_url(ref_url, &request.auth_headers)
-                .await
-        } else {
-            // Get from storage (last known state)
-            if let Ok(Some(snapshot)) = self.storage.get_latest_snapshot(&request.url).await {
-                Ok(snapshot.tools)
-            } else {
-                Ok(Vec::new())
-            }
-        }
-    }
-
     /// Fetch tools from a specific URL
     async fn fetch_tools_from_url(
         &self,
@@ -536,7 +547,7 @@ impl MCPScannerCore {
         if old_tool.description != new_tool.description {
             changes.push(ToolChange {
                 tool_name: new_tool.name.clone(),
-                change_type: "description".to_string(),
+                field: "description".to_string(),
                 old_value: old_tool.description.clone().map(serde_json::Value::String),
                 new_value: new_tool.description.clone().map(serde_json::Value::String),
                 diff: Some("Description changed".to_string()),
@@ -547,7 +558,7 @@ impl MCPScannerCore {
         if old_tool.input_schema != new_tool.input_schema {
             changes.push(ToolChange {
                 tool_name: new_tool.name.clone(),
-                change_type: "input_schema".to_string(),
+                field: "input_schema".to_string(),
                 old_value: old_tool.input_schema.clone(),
                 new_value: new_tool.input_schema.clone(),
                 diff: Some("Input schema modified".to_string()),
