@@ -198,17 +198,7 @@ mod tests {
             format: Some("json".to_string()),
             auth_headers: None,
             return_prompts: Some(true), // Return prompts to avoid LLM calls
-            javelin_mcp_url: Some("https://javelin.live/mcp/example/".to_string()),
-            reference_mcp_url: Some("https://api.example.com/mcp/".to_string()),
-            force_scan: Some(false),
-            include_diff: Some(true),
-            change_detection: Some(crate::storage::ChangeDetectionConfig {
-                enabled: true,
-                compare_schemas: true,
-                compare_descriptions: true,
-                ignore_fields: vec!["timestamp".to_string()],
-                sensitivity: "moderate".to_string(),
-            }),
+            reference_url: Some("https://api.example.com/mcp/".to_string()),
         };
 
         let response = core.scan(request).await;

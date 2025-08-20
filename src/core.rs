@@ -1,6 +1,6 @@
 use crate::config::{ScannerConfig, ScannerConfigManager};
 use crate::scanner::MCPScanner;
-use crate::storage::{ChangeDetectionConfig, ChangeSummary, ToolChange, ToolStorage};
+use crate::storage::{ChangeSummary, ToolChange, ToolStorage};
 use crate::types::{config_utils, MCPTool, ScanConfigBuilder, ScanOptions, ScanResult};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -19,12 +19,8 @@ pub struct ScanRequest {
     /// If true, do not call the LLM; return prompts instead
     pub return_prompts: Option<bool>,
 
-    // 🆕 NEW FIELDS for change detection
-    pub javelin_mcp_url: Option<String>,
-    pub reference_mcp_url: Option<String>,
-    pub force_scan: Option<bool>,
-    pub include_diff: Option<bool>,
-    pub change_detection: Option<ChangeDetectionConfig>,
+    // 🆕 Simplified change detection
+    pub reference_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,7 +196,7 @@ impl MCPScannerCore {
         let timestamp = chrono::Utc::now().to_rfc3339();
 
         // Check if change detection is requested
-        if request.javelin_mcp_url.is_some() || request.reference_mcp_url.is_some() {
+        if request.reference_url.is_some() {
             return self.scan_with_change_detection(request).await;
         }
 
@@ -260,45 +256,22 @@ impl MCPScannerCore {
         let changes_detected = if reference_tools.is_empty() {
             true // First time, consider it changed
         } else {
-            self.tools_have_changed(&reference_tools, &current_tools, &request.change_detection)
+            self.tools_have_changed(&reference_tools, &current_tools)
         };
 
-        // Step 4: Store current snapshot
-        let refresh_happened = request.javelin_mcp_url.is_some();
-        if refresh_happened {
-            if let Err(e) = self
-                .storage
-                .store_snapshot(&request.url, current_tools.clone())
-                .await
-            {
-                warn!("Failed to store tool snapshot: {}", e);
-            }
+        // Step 4: Store current snapshot (always store when doing change detection)
+        if let Err(e) = self
+            .storage
+            .store_snapshot(&request.url, current_tools.clone())
+            .await
+        {
+            warn!("Failed to store tool snapshot: {}", e);
         }
 
-        // Step 5: Generate change summary if requested
-        let change_summary = if request.include_diff.unwrap_or(false) {
-            Some(self.generate_change_summary(&reference_tools, &current_tools))
-        } else {
-            None
-        };
+        // Step 5: Always generate change summary when doing change detection
+        let change_summary = Some(self.generate_change_summary(&reference_tools, &current_tools));
 
-        // Step 6: Decide whether to scan
-        let should_scan = changes_detected || request.force_scan.unwrap_or(false);
-
-        if !should_scan {
-            // Return cached result
-            return ScanResponse {
-                success: true,
-                result: None, // Could load from cache here
-                error: None,
-                timestamp,
-                refresh_happened,
-                changes_detected,
-                change_summary,
-                scan_skipped: true,
-                cache_hit: true,
-            };
-        }
+        // Step 6: Always perform the scan (simplified logic)
 
         // Step 7: Perform actual scan
         match self.perform_scan_internal(request).await {
@@ -307,7 +280,7 @@ impl MCPScannerCore {
                 result: Some(result),
                 error: None,
                 timestamp,
-                refresh_happened,
+                refresh_happened: true, // Always true when doing change detection
                 changes_detected,
                 change_summary,
                 scan_skipped: false,
@@ -318,7 +291,7 @@ impl MCPScannerCore {
                 result: None,
                 error: Some(e.to_string()),
                 timestamp,
-                refresh_happened,
+                refresh_happened: true, // Always true when doing change detection
                 changes_detected,
                 change_summary,
                 scan_skipped: false,
@@ -437,22 +410,16 @@ impl MCPScannerCore {
         }
     }
 
-    /// Get current tools from Javelin MCP or main URL
+    /// Get current tools from main URL
     async fn get_current_tools(&self, request: &ScanRequest) -> Result<Vec<MCPTool>> {
-        if let Some(javelin_url) = &request.javelin_mcp_url {
-            // Refresh from Javelin MCP
-            self.fetch_tools_from_url(javelin_url, &request.auth_headers)
-                .await
-        } else {
-            // Use main URL
-            self.fetch_tools_from_url(&request.url, &request.auth_headers)
-                .await
-        }
+        // Always scan the main URL
+        self.fetch_tools_from_url(&request.url, &request.auth_headers)
+            .await
     }
 
     /// Get reference tools for comparison
     async fn get_reference_tools(&self, request: &ScanRequest) -> Result<Vec<MCPTool>> {
-        if let Some(ref_url) = &request.reference_mcp_url {
+        if let Some(ref_url) = &request.reference_url {
             // Fetch from reference URL
             self.fetch_tools_from_url(ref_url, &request.auth_headers)
                 .await
@@ -485,25 +452,17 @@ impl MCPScannerCore {
         Ok(result.tools)
     }
 
-    /// Check if tools have changed
-    fn tools_have_changed(
-        &self,
-        old_tools: &[MCPTool],
-        new_tools: &[MCPTool],
-        config: &Option<ChangeDetectionConfig>,
-    ) -> bool {
-        let default_config = ChangeDetectionConfig::default();
-        let config = config.as_ref().unwrap_or(&default_config);
-
+    /// Check if tools have changed (simplified)
+    fn tools_have_changed(&self, old_tools: &[MCPTool], new_tools: &[MCPTool]) -> bool {
         // Quick count check
         if old_tools.len() != new_tools.len() {
             return true;
         }
 
-        // Deep comparison based on configuration
+        // Compare each tool
         for new_tool in new_tools {
             if let Some(old_tool) = old_tools.iter().find(|t| t.name == new_tool.name) {
-                if self.tool_has_changed(old_tool, new_tool, config) {
+                if self.tool_has_changed(old_tool, new_tool) {
                     return true;
                 }
             } else {
@@ -522,41 +481,14 @@ impl MCPScannerCore {
         false
     }
 
-    /// Check if individual tool has changed
-    fn tool_has_changed(
-        &self,
-        old_tool: &MCPTool,
-        new_tool: &MCPTool,
-        config: &ChangeDetectionConfig,
-    ) -> bool {
-        // Compare descriptions
-        if config.compare_descriptions && old_tool.description != new_tool.description {
-            return true;
-        }
-
-        // Compare schemas
-        if config.compare_schemas
-            && (old_tool.input_schema != new_tool.input_schema
-                || old_tool.output_schema != new_tool.output_schema)
-        {
-            return true;
-        }
-
-        // Compare other fields based on sensitivity
-        match config.sensitivity.as_str() {
-            "strict" => {
-                old_tool.parameters != new_tool.parameters
-                    || old_tool.category != new_tool.category
-                    || old_tool.tags != new_tool.tags
-                    || old_tool.deprecated != new_tool.deprecated
-            }
-            "moderate" => {
-                old_tool.parameters != new_tool.parameters
-                    || old_tool.deprecated != new_tool.deprecated
-            }
-            "loose" => old_tool.deprecated != new_tool.deprecated,
-            _ => false,
-        }
+    /// Check if individual tool has changed (simplified)
+    fn tool_has_changed(&self, old_tool: &MCPTool, new_tool: &MCPTool) -> bool {
+        // Compare key fields that matter for change detection
+        old_tool.description != new_tool.description
+            || old_tool.input_schema != new_tool.input_schema
+            || old_tool.output_schema != new_tool.output_schema
+            || old_tool.parameters != new_tool.parameters
+            || old_tool.deprecated != new_tool.deprecated
     }
 
     /// Generate change summary
@@ -661,11 +593,7 @@ mod tests {
                 "Bearer token".to_string(),
             )])),
             return_prompts: Some(false),
-            javelin_mcp_url: None,
-            reference_mcp_url: None,
-            force_scan: None,
-            include_diff: None,
-            change_detection: None,
+            reference_url: None,
         };
 
         assert_eq!(request.url, "http://example.com");
@@ -741,11 +669,7 @@ mod tests {
             format: Some("text".to_string()),
             auth_headers: None,
             return_prompts: Some(false),
-            javelin_mcp_url: None,
-            reference_mcp_url: None,
-            force_scan: None,
-            include_diff: None,
-            change_detection: None,
+            reference_url: None,
         };
 
         let request = BatchScanRequest {
@@ -894,11 +818,7 @@ mod tests {
                 "Bearer token".to_string(),
             )])),
             return_prompts: Some(false),
-            javelin_mcp_url: None,
-            reference_mcp_url: None,
-            force_scan: None,
-            include_diff: None,
-            change_detection: None,
+            reference_url: None,
         };
 
         let options = core.parse_scan_options(&request); // No conversion for test
@@ -920,11 +840,7 @@ mod tests {
             format: None,
             auth_headers: None,
             return_prompts: None,
-            javelin_mcp_url: None,
-            reference_mcp_url: None,
-            force_scan: None,
-            include_diff: None,
-            change_detection: None,
+            reference_url: None,
         };
 
         let options = core.parse_scan_options(&request); // No conversion for test

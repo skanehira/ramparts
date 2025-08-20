@@ -24,27 +24,6 @@ pub struct ToolHistory {
     pub total_versions: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChangeDetectionConfig {
-    pub enabled: bool,
-    pub compare_schemas: bool,
-    pub compare_descriptions: bool,
-    pub ignore_fields: Vec<String>,
-    pub sensitivity: String, // "strict", "moderate", "loose"
-}
-
-impl Default for ChangeDetectionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            compare_schemas: true,
-            compare_descriptions: true,
-            ignore_fields: vec!["timestamp".to_string(), "raw_json".to_string()],
-            sensitivity: "moderate".to_string(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChangeSummary {
     pub tools_added: Vec<String>,
