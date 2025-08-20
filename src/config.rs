@@ -3422,6 +3422,112 @@ pub struct PerformanceConfig {
     pub slow_threshold_ms: u64,
 }
 
+/// Tool Refresh Configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolRefreshConfig {
+    /// Enable/disable automatic tool refresh
+    pub enabled: bool,
+    /// Refresh interval in hours
+    pub interval_hours: u64,
+    /// Start time for daily refresh (HH:MM format, UTC)
+    pub start_time: String,
+    /// List of servers to refresh automatically (empty = refresh discovered servers)
+    pub servers: Vec<ToolRefreshServerConfig>,
+    /// Rate limiting configuration
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
+}
+
+/// Rate limiting configuration for tool refresh
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitConfig {
+    /// Maximum number of concurrent server refreshes
+    pub max_concurrent: usize,
+    /// Delay between server refreshes in milliseconds
+    pub delay_between_servers_ms: u64,
+    /// Maximum requests per minute per server
+    pub max_requests_per_minute: u64,
+}
+
+/// Tool refresh server configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolRefreshServerConfig {
+    /// Server URL
+    pub url: String,
+    /// Authentication headers
+    #[serde(default)]
+    pub auth_headers: HashMap<String, String>,
+    /// Connection timeout in seconds
+    #[serde(default = "default_refresh_timeout")]
+    pub timeout: u64,
+}
+
+impl ToolRefreshServerConfig {
+    /// Apply environment variable mappings to auth headers
+    #[allow(dead_code)] // Future feature - will be used when scheduler is re-enabled
+    pub fn with_env_mappings(mut self) -> Self {
+        self.auth_headers = apply_env_mappings(self.auth_headers);
+        self
+    }
+}
+
+fn default_refresh_timeout() -> u64 {
+    30
+}
+
+/// Apply environment variable mappings to auth headers
+/// Maps generic environment variables to standard auth headers
+pub fn apply_env_mappings(mut headers: HashMap<String, String>) -> HashMap<String, String> {
+    // Check for LLM_API_KEY environment variable
+    if let Ok(llm_api_key) = std::env::var("LLM_API_KEY") {
+        // Only add if Authorization header is not already set
+        if !headers.contains_key("Authorization") && !headers.contains_key("authorization") {
+            headers.insert("Authorization".to_string(), format!("Bearer {llm_api_key}"));
+            debug!("Applied LLM_API_KEY environment variable to Authorization header");
+        }
+    }
+
+    // Check for other common generic environment variables
+    if let Ok(api_key) = std::env::var("API_KEY") {
+        if !headers.contains_key("Authorization") && !headers.contains_key("authorization") {
+            headers.insert("Authorization".to_string(), format!("Bearer {api_key}"));
+            debug!("Applied API_KEY environment variable to Authorization header");
+        }
+    }
+
+    // Check for X-API-Key style headers
+    if let Ok(x_api_key) = std::env::var("X_API_KEY") {
+        if !headers.contains_key("X-API-Key") && !headers.contains_key("x-api-key") {
+            headers.insert("X-API-Key".to_string(), x_api_key);
+            debug!("Applied X_API_KEY environment variable to X-API-Key header");
+        }
+    }
+
+    headers
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent: 3,              // Max 3 concurrent refreshes
+            delay_between_servers_ms: 1000, // 1 second delay between servers
+            max_requests_per_minute: 10,    // Max 10 requests per minute per server
+        }
+    }
+}
+
+impl Default for ToolRefreshConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_hours: 24,              // Daily refresh
+            start_time: "02:00".to_string(), // 2 AM UTC
+            servers: Vec::new(),
+            rate_limit: RateLimitConfig::default(),
+        }
+    }
+}
+
 impl Default for ScannerConfig {
     fn default() -> Self {
         Self {
