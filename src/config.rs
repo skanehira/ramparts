@@ -50,6 +50,9 @@ pub struct CursorMCPServerConfig {
     pub url: Option<String>,
     /// Authentication headers
     pub headers: Option<HashMap<String, String>>,
+    /// Server type (stdio, http, etc.)
+    #[serde(rename = "type")]
+    pub server_type: Option<String>,
 }
 
 /// Cursor transport configuration
@@ -351,24 +354,6 @@ pub struct ClaudeServerConfig {
     pub headers: Option<HashMap<String, String>>,
 }
 
-/// Claude Code MCP configuration format (extracted from ~/.claude/settings.json)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClaudeCodeConfig {
-    /// MCP servers configuration
-    #[serde(rename = "mcpServers")]
-    pub mcp_servers: Option<HashMap<String, ClaudeCodeServerConfig>>,
-}
-
-/// Claude Code server configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClaudeCodeServerConfig {
-    #[serde(rename = "type")]
-    pub server_type: String,
-    pub command: String,
-    pub args: Vec<String>,
-    pub env: Option<HashMap<String, String>>,
-}
-
 /// Zed MCP configuration format
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZedMCPConfig {
@@ -570,32 +555,6 @@ impl From<ClaudeMCPConfig> for MCPConfig {
     }
 }
 
-impl From<ClaudeCodeConfig> for MCPConfig {
-    fn from(claude_code_config: ClaudeCodeConfig) -> Self {
-        let servers = claude_code_config.mcp_servers.map(|servers_map| {
-            servers_map
-                .into_iter()
-                .map(|(name, server_config)| MCPServerConfig {
-                    name: Some(name),
-                    url: None,
-                    command: Some(server_config.command),
-                    args: Some(server_config.args),
-                    env: server_config.env,
-                    description: None,
-                    auth_headers: None,
-                    options: None,
-                })
-                .collect()
-        });
-
-        MCPConfig {
-            servers,
-            options: None,
-            auth_headers: None,
-        }
-    }
-}
-
 impl From<ZedMCPConfig> for MCPConfig {
     fn from(zed_config: ZedMCPConfig) -> Self {
         let servers = zed_config.context_servers.map(|context_servers| {
@@ -666,7 +625,6 @@ pub enum MCPClient {
     Windsurf,
     VSCode,
     Claude,
-    ClaudeCode,
     Gemini,
     Neovim,
     Helix,
@@ -681,7 +639,6 @@ impl MCPClient {
             MCPClient::Windsurf => "windsurf",
             MCPClient::VSCode => "vscode",
             MCPClient::Claude => "claude",
-            MCPClient::ClaudeCode => "claude-code",
             MCPClient::Gemini => "gemini",
             MCPClient::Neovim => "neovim",
             MCPClient::Helix => "helix",
@@ -776,6 +733,9 @@ impl MCPConfigManager {
         // Current working directory workspace configurations
         let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
+        // Project root .mcp.json (highest priority)
+        paths.push((current_dir.join(".mcp.json"), MCPClient::Claude));
+
         // VS Code workspace configurations
         paths.push((
             current_dir.join(".vscode").join("mcp.json"),
@@ -802,15 +762,7 @@ impl MCPConfigManager {
             MCPClient::Cursor,
         ));
 
-        // Claude Code workspace configurations
-        paths.push((
-            current_dir.join(".claude").join("settings.json"),
-            MCPClient::ClaudeCode,
-        ));
-        paths.push((
-            current_dir.join(".claude").join("settings.local.json"),
-            MCPClient::ClaudeCode,
-        ));
+        // Claude workspace configurations (.claude/mcp.json only)
         paths.push((
             current_dir.join(".claude").join("mcp.json"),
             MCPClient::Claude,
@@ -847,6 +799,9 @@ impl MCPConfigManager {
                 || dir.join("pyproject.toml").exists()
                 || dir.join("requirements.txt").exists()
             {
+                // Project root .mcp.json (highest priority)
+                paths.push((dir.join(".mcp.json"), MCPClient::Claude));
+
                 // VS Code project root configurations
                 paths.push((dir.join(".vscode").join("mcp.json"), MCPClient::VSCode));
                 paths.push((dir.join(".vscode").join("settings.json"), MCPClient::VSCode));
@@ -859,15 +814,7 @@ impl MCPConfigManager {
                     MCPClient::Cursor,
                 ));
 
-                // Claude Code project root configurations
-                paths.push((
-                    dir.join(".claude").join("settings.json"),
-                    MCPClient::ClaudeCode,
-                ));
-                paths.push((
-                    dir.join(".claude").join("settings.local.json"),
-                    MCPClient::ClaudeCode,
-                ));
+                // Claude project root configurations (.claude/mcp.json only)
                 paths.push((dir.join(".claude").join("mcp.json"), MCPClient::Claude));
 
                 // Windsurf project root configurations
@@ -972,10 +919,6 @@ impl MCPConfigManager {
             paths.push((home_dir.join(".vscode").join("mcp.json"), MCPClient::VSCode));
             paths.push((home_dir.join(".claude").join("mcp.json"), MCPClient::Claude));
             paths.push((
-                home_dir.join(".claude").join("settings.json"),
-                MCPClient::ClaudeCode,
-            ));
-            paths.push((
                 home_dir.join(".gemini").join("settings.json"),
                 MCPClient::Gemini,
             ));
@@ -1019,16 +962,6 @@ impl MCPConfigManager {
                         .join("mcp_config.json"),
                     MCPClient::Windsurf,
                 ));
-
-                // Claude Code enterprise managed settings
-                if let Ok(program_data) = env::var("PROGRAMDATA") {
-                    paths.push((
-                        PathBuf::from(program_data)
-                            .join("ClaudeCode")
-                            .join("managed-settings.json"),
-                        MCPClient::ClaudeCode,
-                    ));
-                }
             }
         }
 
@@ -1108,11 +1041,7 @@ impl MCPConfigManager {
                 MCPClient::Claude,
             ));
 
-            // Claude Code - User/Global scope
-            paths.push((
-                home_dir.join(".claude").join("settings.json"),
-                MCPClient::ClaudeCode,
-            ));
+            // Claude configurations (.claude/mcp.json only)
             paths.push((home_dir.join(".claude").join("mcp.json"), MCPClient::Claude));
             paths.push((
                 home_dir.join(".gemini").join("settings.json"),
@@ -1126,12 +1055,6 @@ impl MCPConfigManager {
             paths.push((
                 app_support.join("Zencoder").join("mcp.json"),
                 MCPClient::Zencoder,
-            ));
-
-            // Claude Code enterprise managed settings
-            paths.push((
-                PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.json"),
-                MCPClient::ClaudeCode,
             ));
 
             // Unix-style configs in home directory
@@ -1187,11 +1110,6 @@ impl MCPConfigManager {
 
             // Claude Desktop
             paths.push((home_dir.join(".claude").join("mcp.json"), MCPClient::Claude));
-            // Claude Code
-            paths.push((
-                home_dir.join(".claude").join("settings.json"),
-                MCPClient::ClaudeCode,
-            ));
             paths.push((
                 home_dir.join(".gemini").join("settings.json"),
                 MCPClient::Gemini,
@@ -1211,9 +1129,6 @@ impl MCPConfigManager {
                 MCPClient::Claude,
             ));
 
-            // Claude Code - User/Global scope already added above
-            paths.push((home_dir.join(".claude").join("mcp.json"), MCPClient::Claude));
-
             // Neovim
             paths.push((config_dir.join("nvim").join("mcp.json"), MCPClient::Neovim));
 
@@ -1227,12 +1142,6 @@ impl MCPConfigManager {
             paths.push((
                 config_dir.join("zencoder").join("mcp.json"),
                 MCPClient::Zencoder,
-            ));
-
-            // Claude Code enterprise managed settings
-            paths.push((
-                PathBuf::from("/etc/claude-code/managed-settings.json"),
-                MCPClient::ClaudeCode,
             ));
         }
 
@@ -1249,40 +1158,45 @@ impl MCPConfigManager {
             .map(str::to_lowercase)
             .collect();
 
+        debug!("detect_client: checking path: {}", path.display());
+        debug!("detect_client: path components: {:?}", components);
+
         // Check specific file names FIRST for most precise detection
         if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+            debug!("detect_client: filename: '{}'", filename);
             match filename {
-                "claude_desktop_config.json" => return Some(MCPClient::Claude),
+                "claude_desktop_config.json" => {
+                    debug!("detect_client: detected Claude via claude_desktop_config.json");
+                    return Some(MCPClient::Claude);
+                }
+                "mcp.json" => {
+                    // .mcp.json files use Cursor-compatible format, so detect as Claude for proper parsing
+                    debug!("detect_client: detected Claude via mcp.json");
+                    return Some(MCPClient::Claude);
+                }
+                ".mcp.json" => {
+                    // Handle .mcp.json files (with dot prefix)
+                    debug!("detect_client: detected Claude via .mcp.json");
+                    return Some(MCPClient::Claude);
+                }
                 "settings.json" => {
-                    // Check if it's in a Claude Code directory (exact match)
-                    if components.iter().any(|c| c == ".claude") {
-                        return Some(MCPClient::ClaudeCode);
-                    }
                     // Check if it's in a VS Code directory (exact matches)
                     if components
                         .iter()
                         .any(|c| c == "code" || c == "vscode" || c == ".vscode")
                     {
+                        debug!(
+                            "detect_client: detected VSCode via settings.json in VSCode directory"
+                        );
                         return Some(MCPClient::VSCode);
                     }
                 }
-                "settings.local.json" => {
-                    // Claude Code local settings (exact match)
-                    if components.iter().any(|c| c == ".claude") {
-                        return Some(MCPClient::ClaudeCode);
-                    }
+                _ => {
+                    debug!("detect_client: filename '{}' not recognized", filename);
                 }
-                "managed-settings.json" => {
-                    // Claude Code enterprise managed settings (exact component matches)
-                    if components
-                        .iter()
-                        .any(|c| c == "claudecode" || c == "claude-code")
-                    {
-                        return Some(MCPClient::ClaudeCode);
-                    }
-                }
-                _ => {}
             }
+        } else {
+            debug!("detect_client: no filename found");
         }
 
         // Check path components for broader matching
@@ -1433,10 +1347,31 @@ impl MCPConfigManager {
     /// Helper function to parse Cursor-compatible MCP configuration format
     /// Used by Claude, Claude Code, Cursor, Windsurf, and Gemini
     fn try_parse_cursor_compatible_config(content: &str, client_name: &str) -> Option<MCPConfig> {
+        debug!(
+            "try_parse_cursor_compatible_config: attempting to parse {} format",
+            client_name
+        );
         if let Ok(cursor_config) = serde_json::from_str::<CursorMCPConfig>(content) {
-            debug!("Parsed as {} configuration format", client_name);
+            debug!(
+                "try_parse_cursor_compatible_config: successfully parsed {} format",
+                client_name
+            );
+            if let Some(ref servers) = cursor_config.mcp_servers {
+                debug!(
+                    "try_parse_cursor_compatible_config: parsed config has {} servers",
+                    servers.len()
+                );
+            } else {
+                debug!(
+                    "try_parse_cursor_compatible_config: parsed config has no mcp_servers field"
+                );
+            }
             Some(Self::convert_cursor_config(cursor_config))
         } else {
+            debug!(
+                "try_parse_cursor_compatible_config: failed to parse {} format",
+                client_name
+            );
             None
         }
     }
@@ -1457,9 +1392,16 @@ impl MCPConfigManager {
         let client = Self::detect_client(path);
         let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
+        debug!(
+            "load_config_from_path: processing file '{}', detected client: {:?}",
+            path.display(),
+            client
+        );
+
         // Try parsing based on client type and file name
         match client {
             Some(MCPClient::Cursor) => {
+                debug!("load_config_from_path: processing as Cursor client");
                 if let Some(config) =
                     Self::try_parse_cursor_compatible_config(&content, "Cursor MCP")
                 {
@@ -1467,8 +1409,13 @@ impl MCPConfigManager {
                 }
             }
             Some(MCPClient::Claude) => {
+                debug!(
+                    "load_config_from_path: processing as Claude client, filename: '{}'",
+                    filename
+                );
                 // Claude Desktop uses claude_desktop_config.json
                 if filename == "claude_desktop_config.json" {
+                    debug!("load_config_from_path: trying Claude Desktop format");
                     if let Ok(claude_config) = serde_json::from_str::<ClaudeDesktopConfig>(&content)
                     {
                         debug!("Parsed as Claude Desktop configuration format");
@@ -1476,7 +1423,8 @@ impl MCPConfigManager {
                     }
                 }
                 // Claude mcp.json files use Cursor format
-                else if filename == "mcp.json" {
+                else if filename == "mcp.json" || filename == ".mcp.json" {
+                    debug!("load_config_from_path: trying Claude MCP format (cursor-compatible)");
                     if let Some(config) =
                         Self::try_parse_cursor_compatible_config(&content, "Claude MCP")
                     {
@@ -1484,17 +1432,8 @@ impl MCPConfigManager {
                     }
                 }
             }
-            Some(MCPClient::ClaudeCode) => {
-                // Claude Code uses settings.json files in .claude directory
-                if filename == "settings.json" || filename == "settings.local.json" {
-                    if let Some(config) =
-                        Self::try_parse_cursor_compatible_config(&content, "Claude Code")
-                    {
-                        return Ok(config);
-                    }
-                }
-            }
             Some(MCPClient::Windsurf) | Some(MCPClient::Gemini) => {
+                debug!("load_config_from_path: processing as Windsurf/Gemini client");
                 // Windsurf and Gemini use Cursor-compatible format
                 let client_name = format!("{} MCP", client.as_ref().unwrap().name());
                 if let Some(config) =
@@ -1504,6 +1443,7 @@ impl MCPConfigManager {
                 }
             }
             Some(MCPClient::VSCode) => {
+                debug!("load_config_from_path: processing as VSCode client");
                 // VS Code settings.json may contain MCP configuration
                 if filename == "settings.json" {
                     if let Ok(vscode_config) = serde_json::from_str::<VSCodeSettings>(&content) {
@@ -1520,13 +1460,17 @@ impl MCPConfigManager {
                     }
                 }
             }
-            _ => {}
+            _ => {
+                debug!("load_config_from_path: no specific client detected, trying fallback");
+            }
         }
 
+        debug!("load_config_from_path: trying standard format parsing");
         // Try parsing as standard format
         match serde_json::from_str::<MCPConfig>(&content) {
             Ok(config) => Ok(config),
             Err(e) => {
+                debug!("load_config_from_path: standard format failed, trying fallback formats");
                 // Try fallback parsing for different formats
                 if let Some(config) =
                     Self::try_parse_cursor_compatible_config(&content, "Cursor MCP (fallback)")
@@ -1558,12 +1502,17 @@ impl MCPConfigManager {
 
     /// Convert Cursor MCP configuration to standard format
     fn convert_cursor_config(cursor_config: CursorMCPConfig) -> MCPConfig {
-        let servers = cursor_config.mcp_servers.map(|mcp_servers| {
+        let servers: Option<Vec<MCPServerConfig>> = cursor_config.mcp_servers.map(|mcp_servers| {
+            debug!("convert_cursor_config: found {} servers in mcp_servers", mcp_servers.len());
             mcp_servers
                 .into_iter()
                 .filter_map(|(name, server_config)| {
+                    debug!("convert_cursor_config: processing server '{}': command={:?}, url={:?}, transport={:?}", 
+                          name, server_config.command, server_config.url, server_config.transport);
+                    
                     // Use explicit URL first, then build from transport config, then handle STDIO servers
                     if let Some(url) = server_config.url {
+                        debug!("convert_cursor_config: server '{}' is HTTP server with URL", name);
                         // HTTP server with explicit URL
                         Some(MCPServerConfig {
                             name: Some(name),
@@ -1576,6 +1525,7 @@ impl MCPConfigManager {
                             options: None,
                         })
                     } else if let Some(transport) = &server_config.transport {
+                        debug!("convert_cursor_config: server '{}' has transport config", name);
                         // HTTP server with transport configuration
                         let host = transport.host.as_deref().unwrap_or("localhost");
                         let port = transport.port.unwrap_or(8080);
@@ -1598,6 +1548,7 @@ impl MCPConfigManager {
                             options: None,
                         })
                     } else if server_config.command.is_some() {
+                        debug!("convert_cursor_config: server '{}' is STDIO server with command", name);
                         // STDIO server with command configuration
                         Some(MCPServerConfig {
                             name: Some(name.clone()),
@@ -1610,12 +1561,22 @@ impl MCPConfigManager {
                             options: None,
                         })
                     } else {
+                        debug!("convert_cursor_config: server '{}' has no valid configuration, skipping", name);
                         // Skip servers without proper configuration
                         None
                     }
                 })
                 .collect()
         });
+
+        if let Some(ref server_list) = servers {
+            debug!(
+                "convert_cursor_config: final result has {} servers",
+                server_list.len()
+            );
+        } else {
+            debug!("convert_cursor_config: no servers in final result");
+        }
 
         MCPConfig {
             servers,
@@ -1826,13 +1787,6 @@ impl MCPConfigManager {
     fn parse_claude_config(content: &str) -> Result<MCPConfig> {
         let claude_config: ClaudeMCPConfig = serde_json::from_str(content)?;
         Ok(claude_config.into())
-    }
-
-    /// Parse Claude Code MCP config format (from ~/.claude/settings.json)
-    #[allow(dead_code)]
-    fn parse_claude_code_config(content: &str) -> Result<MCPConfig> {
-        let claude_code_config: ClaudeCodeConfig = serde_json::from_str(content)?;
-        Ok(claude_code_config.into())
     }
 
     /// Parse Zed MCP config format
@@ -2507,6 +2461,7 @@ mod tests {
         assert_eq!(MCPClient::Windsurf.name(), "windsurf");
         assert_eq!(MCPClient::VSCode.name(), "vscode");
         assert_eq!(MCPClient::Claude.name(), "claude");
+        assert_eq!(MCPClient::Gemini.name(), "gemini");
         assert_eq!(MCPClient::Neovim.name(), "neovim");
         assert_eq!(MCPClient::Helix.name(), "helix");
         assert_eq!(MCPClient::Zed.name(), "zed");
@@ -2915,6 +2870,68 @@ mod tests {
     }
 
     #[test]
+    fn test_actual_mcp_json_parsing() {
+        let content = r#"{
+  "mcpServers": {
+    "serena": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/oraios/serena", "serena-mcp-server", "--context", "ide-assistant", "--project", "."],
+      "env": {}
+    },
+    "context7": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"],
+      "env": {}
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"]
+    }
+  }
+}"#;
+
+        // Test parsing as Cursor config
+        let result = MCPConfigManager::parse_cursor_config(content);
+        assert!(
+            result.is_ok(),
+            "Failed to parse actual .mcp.json content: {:?}",
+            result.err()
+        );
+
+        let config = result.unwrap();
+        assert!(config.servers.is_some());
+        let servers = config.servers.unwrap();
+        assert_eq!(
+            servers.len(),
+            3,
+            "Expected 3 servers, got {}",
+            servers.len()
+        );
+
+        // Check each server
+        let serena_server = servers
+            .iter()
+            .find(|s| s.name.as_deref() == Some("serena"))
+            .expect("serena server not found");
+        assert_eq!(serena_server.command, Some("uvx".to_string()));
+        assert!(serena_server.args.is_some());
+
+        let context7_server = servers
+            .iter()
+            .find(|s| s.name.as_deref() == Some("context7"))
+            .expect("context7 server not found");
+        assert_eq!(context7_server.command, Some("npx".to_string()));
+
+        let playwright_server = servers
+            .iter()
+            .find(|s| s.name.as_deref() == Some("playwright"))
+            .expect("playwright server not found");
+        assert_eq!(playwright_server.command, Some("npx".to_string()));
+    }
+
+    #[test]
     fn test_windsurf_config_parsing() {
         let windsurf_content = r#"{
             "servers": {
@@ -3026,68 +3043,6 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_code_config_parsing() {
-        let claude_code_content = r#"{
-            "numStartups": 36,
-            "installMethod": "unknown", 
-            "mcpServers": {
-                "sequential-thinking": {
-                    "type": "stdio",
-                    "command": "npx",
-                    "args": ["-y", "u/modelcontextprotocol/server-sequential-thinking"],
-                    "env": {}
-                },
-                "filesystem": {
-                    "type": "stdio",
-                    "command": "uvx",
-                    "args": ["mcp-server-filesystem", "/tmp"],
-                    "env": {
-                        "DEBUG": "true"
-                    }
-                }
-            }
-        }"#;
-
-        // Test Claude Code format parsing
-        let result = MCPConfigManager::parse_claude_code_config(claude_code_content);
-        assert!(
-            result.is_ok(),
-            "Failed to parse Claude Code config: {:?}",
-            result.err()
-        );
-
-        let config = result.unwrap();
-        assert!(config.servers.is_some());
-        let servers = config.servers.unwrap();
-        assert_eq!(servers.len(), 2);
-
-        // Check sequential-thinking server
-        let seq_server = servers
-            .iter()
-            .find(|s| s.name.as_deref() == Some("sequential-thinking"))
-            .unwrap();
-        assert_eq!(seq_server.command, Some("npx".to_string()));
-        assert_eq!(
-            seq_server.args,
-            Some(vec![
-                "-y".to_string(),
-                "u/modelcontextprotocol/server-sequential-thinking".to_string()
-            ])
-        );
-        assert_eq!(seq_server.url, None);
-
-        // Check filesystem server with env
-        let fs_server = servers
-            .iter()
-            .find(|s| s.name.as_deref() == Some("filesystem"))
-            .unwrap();
-        assert_eq!(fs_server.command, Some("uvx".to_string()));
-        assert!(fs_server.env.is_some());
-        let env = fs_server.env.as_ref().unwrap();
-        assert_eq!(env.get("DEBUG"), Some(&"true".to_string()));
-    }
-
-    #[test]
     fn test_vscode_array_config_parsing() {
         let vscode_array_content = r#"{
             "servers": [
@@ -3149,16 +3104,8 @@ mod tests {
     }
 
     #[test]
-    fn test_client_path_detection_claude_code() {
-        // Test Claude Code vs Claude Desktop path detection
-        assert_eq!(
-            MCPConfigManager::detect_client("/home/user/.claude/settings.json"),
-            Some(MCPClient::ClaudeCode)
-        );
-        assert_eq!(
-            MCPConfigManager::detect_client("/home/user/.claude/settings.local.json"),
-            Some(MCPClient::ClaudeCode)
-        );
+    fn test_client_path_detection_claude() {
+        // Test Claude Desktop path detection
         assert_eq!(
             MCPConfigManager::detect_client("/home/user/.claude/mcp.json"),
             Some(MCPClient::Claude)
@@ -3295,7 +3242,7 @@ mod tests {
         // Test combined with other path detections
         assert_eq!(
             MCPConfigManager::detect_client("/home/user/.claude/settings.json"),
-            Some(MCPClient::ClaudeCode)
+            Some(MCPClient::Claude)
         );
         assert_eq!(
             MCPConfigManager::detect_client("/home/user/.codeium/windsurf/mcp_config.json"),
@@ -3305,12 +3252,11 @@ mod tests {
 
     #[test]
     fn test_client_name_mappings_complete() {
-        // Test all client name mappings including Claude Code and Gemini
+        // Test all client name mappings
         assert_eq!(MCPClient::Cursor.name(), "cursor");
         assert_eq!(MCPClient::Windsurf.name(), "windsurf");
         assert_eq!(MCPClient::VSCode.name(), "vscode");
         assert_eq!(MCPClient::Claude.name(), "claude");
-        assert_eq!(MCPClient::ClaudeCode.name(), "claude-code");
         assert_eq!(MCPClient::Gemini.name(), "gemini");
         assert_eq!(MCPClient::Neovim.name(), "neovim");
         assert_eq!(MCPClient::Helix.name(), "helix");
