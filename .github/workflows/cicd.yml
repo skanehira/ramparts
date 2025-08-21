@@ -16,7 +16,7 @@ env:
   DEVOPS_REPO: "javelin-cloud"
   DEVOPS_BRANCH: "main"
   CICD_TRIGGER: "enable"
-  CICD_WORKFLOW: "manual-deploy-ramparts-server.yml"
+  CICD_WORKFLOW: "trigger-dev-deploy-ramparts-server.yml"
 
 jobs:
   reusable-vars:
